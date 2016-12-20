@@ -1,0 +1,7 @@
+r: ready
+w: ready
+w: open
+r: open
+close
+close
+end

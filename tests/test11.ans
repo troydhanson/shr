@@ -1,0 +1,9 @@
+r: ready
+w: ready
+r: open
+w: open
+w: close
+r: close
+w: eof
+r: eof
+end

@@ -1,0 +1,28 @@
+r: ready
+w: ready
+w: open
+r: open
+w: stat: 0
+w: bw 0, br 0, mw 0, mr 0, md 0, bd 0, bn 40, bu 0, mu 0
+w: write
+w: stat: 0
+w: bw 11, br 0, mw 1, mr 0, md 0, bd 0, bn 40, bu 11, mu 1
+w: write
+w: stat: 0
+w: bw 22, br 0, mw 2, mr 0, md 0, bd 0, bn 40, bu 22, mu 2
+w: write
+w: stat: 0
+w: bw 33, br 0, mw 3, mr 0, md 0, bd 0, bn 40, bu 33, mu 3
+r: readv
+r: rc 9
+r: niov 3
+[abc]
+[abc]
+[abc]
+w: stat: 0
+w: bw 33, br 33, mw 3, mr 3, md 0, bd 0, bn 40, bu 0, mu 0
+w: close
+r: close
+w: eof
+r: eof
+end

@@ -1,0 +1,21 @@
+r: ready
+w: ready
+w: open
+r: open
+w: write
+w: write
+w: write
+r: read
+r: rc = 7
+r: [abcdef]
+r: read
+r: rc = 7
+r: [abcdef]
+r: read
+r: rc = 0
+r: wouldblock
+w: close
+r: close
+w: eof
+r: eof
+end

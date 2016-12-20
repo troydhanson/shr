@@ -1,0 +1,14 @@
+r: ready
+w: ready
+r: open
+w: open
+w: write
+r: read
+r: [squir]
+r: read
+r: [rel]
+w: close
+r: close
+w: eof
+r: eof
+end

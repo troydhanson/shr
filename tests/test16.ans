@@ -1,0 +1,14 @@
+r: ready
+w: ready
+r: open
+w: open
+r: read
+w: write
+r: [squirrel]
+w: unlink
+w: close
+r: close
+w: eof
+r: eof
+already unlinked
+end

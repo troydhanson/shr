@@ -1,0 +1,15 @@
+r: ready
+w: ready
+w: open
+r: open
+w: write
+r: undersized read
+r: -3
+r: read
+r: 361
+w: unlink
+w: close
+r: close
+w: eof
+r: eof
+end

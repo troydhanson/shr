@@ -1,0 +1,3 @@
+writing 2 iovec...ok
+writing 1 iovec...non-blocking shr_write: would block
+end

@@ -1,0 +1,16 @@
+r: ready
+w: ready
+w: open
+r: open
+w: write
+r: read
+r: 361
+w: write
+r: read
+r: 361
+w: unlink
+w: close
+r: close
+w: eof
+r: eof
+end

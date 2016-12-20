@@ -1,0 +1,14 @@
+r: ready
+w: ready
+1000000 msgs total 361000000 bytes
+writing
+w: open
+w: fill
+w: close
+w: eof
+reading
+r: open
+r: empty
+r: close
+r: eof
+end

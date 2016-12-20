@@ -1,0 +1,15 @@
+r: ready
+w: ready
+w: open
+r: open
+w: write
+w: write
+w: write
+r: readv
+r: rc -3
+r: niov 0
+w: close
+r: close
+w: eof
+r: eof
+end

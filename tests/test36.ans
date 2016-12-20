@@ -1,0 +1,25 @@
+r: ready
+w: ready
+r: open
+w: open
+w: write
+w: write
+w: write
+r: read
+r: []
+r: read
+r: [qu]
+r: read
+r: [ir]
+r: read
+r: [re]
+r: read
+r: [l]
+r: read
+r: wouldblock
+w: unlink
+w: close
+r: close
+w: eof
+r: eof
+end

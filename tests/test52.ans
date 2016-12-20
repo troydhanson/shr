@@ -1,0 +1,18 @@
+r: ready
+w: ready
+w: open
+r: open
+w: write
+w: write
+w: write
+r: readv
+r: rc 9
+r: niov 3
+[abc]
+[abc]
+[abc]
+w: close
+r: close
+w: eof
+r: eof
+end
