@@ -12,6 +12,7 @@ AC_CHECK_LIB(ncurses,initscr,
   AM_CONDITIONAL(HAVE_NCURSES,false))
 
 AC_CONFIG_FILES([Makefile
+   src/Makefile
    util/Makefile
    ])
 AC_OUTPUT
