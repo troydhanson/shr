@@ -46,16 +46,15 @@ int shr_stat(shr *s, struct shr_stat *stat, struct timeval *reset);
 #define SHR_OVERWRITE    (1U << 0) /* shr_init */
 #define SHR_KEEPEXIST    (1U << 1) /* shr_init */
 #define SHR_MESSAGES     (1U << 2) /* shr_init */
-#define SHR_LRU_DROP     (1U << 3) /* shr_init */
+#define SHR_DROP         (1U << 3) /* shr_init */
 #define SHR_INIT_FENCE   (1U << 4) /* init max */
 #define SHR_WANT_SPACE   (1U << 5) /* internal */
 #define SHR_WANT_DATA    (1U << 6) /* internal */
 #define SHR_OPEN_FENCE   (1U << 7) /* open min */
 #define SHR_RDONLY       (1U << 8) /* shr_open */
-#define SHR_WRONLY       (1U <<  9) /* shr_open */
+#define SHR_WRONLY       (1U << 9) /* shr_open */
 #define SHR_NONBLOCK     (1U << 10) /* shr_open */
-#define SHR_SELECTFD     (1U << 11) /* shr_open */
-#define SHR_LOCAL_OFFSET (1U << 12) /* shr_open */
+#define SHR_LOCAL_OFFSET (1U << 11) /* shr_open */
 
 #if defined __cplusplus
 }

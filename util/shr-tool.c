@@ -23,28 +23,38 @@ struct {
   int flags;
   int block;
 } CF = {
+  .flags = SHR_KEEPEXIST | SHR_MESSAGES | SHR_DROP,
 };
 
 void usage() {
-  fprintf(stderr,"usage: %s [options] <ring>\n", CF.prog);
-  fprintf(stderr,"options:\n"
-                 "         -c [-f <mode>] [-s <size>]  (create ring)\n"
-                 "         -q                          (status ring) [default]\n"
-                 "         -w -s <count>               (do <count> writes @ 1/sec)\n"
-                 "         -r -b [0|1]                 (read ring, -b 0=nonblock)\n"
+  fprintf(stderr,"usage: %s [mode options] <ring>\n", CF.prog);
+  fprintf(stderr,"mode options:\n"
                  "\n"
-                 "  <size> is allowed to have k/m/g/t suffix\n"
-                 "  <mode> is a legal combination of okml\n"
-                 "         o = overwrite, clear and resize ring, if it already exists\n"
-                 "         k = keep existing ring size/content, if it already exists\n"
-                 "         m = message mode; each i/o is a full message, not a stream\n"
-                 "         l = lru-overwrite; reclaim oldest elements when ring fills\n"
+                 "  create ring\n"
+                 "\n"
+                 "         -c [ -f <mode> ] -s <size>\n"
+                 "\n"
+                 "  <size> may have k/m/g/t suffix (kilobytes,megabytes,etc)\n"
+                 "  <mode> is a combination of these (default: mdk)\n"
+                 "         m (message mode;  consider each read/write one message)\n"
+                 "         d (drop mode:     reclaim old, unread data when full)\n"
+                 "         k (keep existing; if it exists, leave ring as-is)\n"
+                 "         o (overwrite;     if it exists, resize and clear ring)\n"
+                 "\n"
+                 " dump metrics from ring:\n"
+                 "\n"
+                 "         -q\n"
+                 "\n"
+                 "  read/write test data\n"
+                 "\n"
+                 "        -r [-b 0|1]     (read all data; -b 1 to block\n"
+                 "        -w [-s <count>] (write test data, once per sec)\n"
                  "\n");
   exit(-1);
 }
 
 int main(int argc, char *argv[]) {
-  int opt, rc=-1, sc;
+  int opt, rc=-1, sc, mode;
   CF.prog = argv[0];
   char unit, *c, buf[100];
   struct shr_stat stat;
@@ -73,13 +83,14 @@ int main(int argc, char *argv[]) {
          }
          break;
       case 'f': /* ring mode */
+         CF.flags = 0; /* override default */
          c = optarg;
          while((*c) != '\0') {
            switch (*c) {
-             case 'o': CF.flags |= SHR_OVERWRITE; break;
-             case 'k': CF.flags |= SHR_KEEPEXIST; break;
              case 'm': CF.flags |= SHR_MESSAGES; break;
-             case 'l': CF.flags |= SHR_LRU_DROP; break;
+             case 'd': CF.flags |= SHR_DROP; break;
+             case 'k': CF.flags |= SHR_KEEPEXIST; break;
+             case 'o': CF.flags |= SHR_OVERWRITE; break;
              default: usage(); break;
            }
            c++;
@@ -94,30 +105,43 @@ int main(int argc, char *argv[]) {
   switch(CF.mode) {
 
     case mode_create:
+      if (CF.size || CF.flags) usage();
       rc = shr_init(CF.ring, CF.size, CF.flags);
       if (rc < 0) goto done;
       break;
 
     case mode_status:
-      if (CF.size || CF.flags) usage();
       CF.shr = shr_open(CF.ring, SHR_RDONLY);
       if (CF.shr == NULL) goto done;
       rc = shr_stat(CF.shr, &stat, NULL);
       if (rc < 0) goto done;
-      printf("w: bw %ld, br %ld, mw %ld, mr %ld, md %ld, bd %ld, bn %ld, bu %ld mu %ld\n",
-         stat.bw, stat.br, stat.mw, stat.mr, stat.md, stat.bd, stat.bn, stat.bu, stat.mu);
+      printf(" bytes-written %ld\n"
+             " bytes-read %ld\n"
+             " bytes-dropped %ld\n"
+             " messages-written %ld\n"
+             " messages-read %ld\n"
+             " messages-dropped %ld\n"
+             " ring-size %ld\n"
+             " bytes-ready %ld\n"
+             " messages-ready %ld\n",
+         stat.bw, stat.br, stat.bd, stat.mw, stat.mr, stat.md, stat.bn,
+         stat.bu, stat.mu);
       break;
 
     case mode_read:
-      CF.shr = shr_open(CF.ring, SHR_RDONLY | ((CF.block == 0) ? SHR_NONBLOCK : 0));
+      mode = SHR_RDONLY;
+      if (CF.block == 0) mode |= SHR_NONBLOCK;
+      CF.shr = shr_open(CF.ring, mode);
       if (CF.shr == NULL) goto done;
       while(1) {
         nr = shr_read(CF.shr, buf, sizeof(buf));
         if (nr <= 0) {
-          fprintf(stderr, "shr_read error: %ld\n", nr);
+          fprintf(stderr, "shr_read: %s (%ld)\n", 
+             (nr == 0) ? "end-of-data" : "error", nr); 
           goto done;
+        } else {
+          printf("read %ld bytes: %.*s\n", nr, (int)nr, buf);
         }
-        if (nr) printf("%ld bytes: [%.*s]\n", nr, (int)nr, buf);
       }
       break;
 
@@ -129,9 +153,8 @@ int main(int argc, char *argv[]) {
         time_t now = time(NULL);
         char *tstr = asctime(localtime(&now));
         nr = strlen(tstr);
-        if ((nr > 0) && (tstr[nr-1] == '\n')) tstr[nr-1] = '\0';
-        if (shr_write(CF.shr, tstr, strlen(tstr)) < 0) goto done;
-        sleep(1);
+        if (shr_write(CF.shr, tstr, nr) < 0) goto done;
+        if (CF.size) sleep(1);
       }
       break;
 

@@ -163,7 +163,6 @@ int handle_io(void) {
 
   switch(cfg.mode) {
     case mode_pub:
-      do {
         iovcnt = BATCH_FRAMES;
         rv = shr_readv(cfg.ring, cfg.buf, BATCH_BYTES, cfg.iov, &iovcnt);
         if (rv < 0) fprintf(stderr, "shr_readv: error\n");
@@ -189,7 +188,6 @@ int handle_io(void) {
           }
           cfg.ompp += iovcnt;
         }
-      } while(rv > 0); /* shr requires us to drain ring in shr_selectfd mode */
       break;
     default:
       assert(0);
@@ -351,7 +349,7 @@ int main(int argc, char *argv[]) {
   switch(cfg.mode) {
 
     case mode_pub:
-      cfg.ring = shr_open(cfg.file, SHR_RDONLY|SHR_SELECTFD|SHR_NONBLOCK);
+      cfg.ring = shr_open(cfg.file, SHR_RDONLY|SHR_NONBLOCK);
       if (cfg.ring == NULL) goto done;
       cfg.ring_fd = shr_get_selectable_fd(cfg.ring);
       if (cfg.ring_fd < 0) goto done;

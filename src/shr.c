@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <sys/types.h>
+#include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/mman.h>
 #include <signal.h>
@@ -134,7 +135,7 @@ static int unlock(int fd) {
  *    SHR_OVERWRITE - permits ring to exist already, overwrites it
  *    SHR_KEEPEXIST - permits ring to exist already, leaves size/content
  *    SHR_MESSAGES  - ring i/o occurs in messages instead of byte stream
- *    SHR_LRU_DROP  - overwrite old ring data as ring fills, even if unread
+ *    SHR_DROP      - overwrite old ring data as ring fills, even if unread
  *
  * returns 0 on success
  *        -1 on error
@@ -208,7 +209,7 @@ int shr_init(char *file, size_t sz, unsigned flags, ...) {
 
   r->gflags = 0;
   if (flags & SHR_MESSAGES) r->gflags |= SHR_MESSAGES;
-  if (flags & SHR_LRU_DROP) r->gflags |= SHR_LRU_DROP;
+  if (flags & SHR_DROP) r->gflags |= SHR_DROP;
   assert (flags < SHR_INIT_FENCE);
 
   rc = 0;
@@ -273,12 +274,42 @@ static int validate_ring(struct shr *s) {
   return rc;
 }
 
+static int make_blocking(int fd) {
+  int fl, unused = 0, rc = -1;
+
+  fl = fcntl(fd, F_GETFL, unused);
+  if (fl < 0) {
+    fprintf(stderr, "fcntl: %s\n", strerror(errno));
+    goto done;
+  }
+
+  if ((fl & O_NONBLOCK) == 0) {
+    rc = 0;
+    goto done;
+  }
+
+  if (fcntl(fd, F_SETFL, fl & (~O_NONBLOCK)) < 0) {
+    fprintf(stderr, "fcntl: %s\n", strerror(errno));
+    goto done;
+  }
+
+  rc = 0;
+
+ done:
+  return rc;
+}
+
 static int make_nonblock(int fd) {
   int fl, unused = 0, rc = -1;
 
   fl = fcntl(fd, F_GETFL, unused);
   if (fl < 0) {
     fprintf(stderr, "fcntl: %s\n", strerror(errno));
+    goto done;
+  }
+
+  if (fl & O_NONBLOCK) {
+    rc = 0;
     goto done;
   }
 
@@ -293,61 +324,54 @@ static int make_nonblock(int fd) {
   return rc;
 }
 
-static int set_initial_readiness(shr *s) {
-  int rc = -1, fl, unused = 0;
-  char b = 0;
+/* a program that has the ring open for reading, can optionally get a file
+ * descriptor (via shr_get_selectable_fd) that is compatible with select/poll,
+ * to know when data can be read from the ring. the descriptor is the bell fifo.
+ * 
+ * after each shr_read we ensure the bell readiness is accurately updated. to
+ * do so, we either drain the bell fifo to prevent poll triggering if no data
+ * is left in the ring, or we put a byte into the fifo if data remains in the
+ * ring, as peers do when they put data in.
+ */
+static int refresh_bell(shr *s) {
+  char b = 0, discard[1024];
+  int nr;
 
-  assert(s->flags & SHR_RDONLY);
-  assert(s->flags & SHR_NONBLOCK);
-  assert(s->flags & SHR_SELECTFD);
+  if (make_nonblock(s->bell_fd) < 0) return -1;
 
-  /* if ring is empty we are done */
-  if (s->r->u == 0) {
-    rc = 0;
-    goto done;
+  if (s->r->u == 0) { /* no data in ring. drain fifo to prevent poll trigger */
+    do {
+      nr = read(s->bell_fd, &discard, sizeof(discard));
+    } while (nr > 0);
+
+  } else { /*  ring has unread data. put a byte in fifo so poll triggers */
+    nr = write(s->bell_fd, &b, sizeof(b));
   }
 
-  /* set initial readability since prior data in ring */
-  fl = fcntl(s->bell_fd, F_GETFL, unused);
-  if (fl < 0) {
-    fprintf(stderr, "fcntl: %s\n", strerror(errno));
-    goto done;
-  }
+  if ((nr == -1) && !((errno == EAGAIN) || (errno==EWOULDBLOCK))) {
+    fprintf(stderr,"read/write: %s\n", strerror(errno));
+    return -1;
+  } 
 
-  if (fcntl(s->bell_fd, F_SETFL, fl | O_NONBLOCK) < 0) {
-    fprintf(stderr, "fcntl: %s\n", strerror(errno));
-    goto done;
-  }
-
-  if (write(s->bell_fd, &b, sizeof(b)) < 0) {
-    if ((errno != EWOULDBLOCK) && (errno != EAGAIN)) {
-      fprintf(stderr, "write: %s\n", strerror(errno));
-      goto done;
-    }
-  }
-
-  if (fcntl(s->bell_fd, F_SETFL, fl) < 0) {
-    fprintf(stderr, "fcntl: %s\n", strerror(errno));
-    goto done;
-  }
-
-  rc = 0;
-
- done:
-  return rc;
+  return 0;
 }
 
 /*
  * shr_get_selectable_fd
  *
  * returns a file descriptor that can be used with select/poll/epoll 
- * succeeds only if the ring was opened with SHR_RDONLY|SHR_SELECTFD
+ *
+ * succeeds only if the ring was opened with SHR_RDONLY|SHR_NONBLOCK
+ * because spurious wakeups can occur (e.g. writer puts byte into 
+ * ring while two readers await data; both wake up, but one gets it).
+ * so the caller must be non-blocking to deal with spurious wakeups
+ * 
  */
 int shr_get_selectable_fd(shr *s) {
   int rc = -1;
 
-  if ((s->flags & SHR_SELECTFD) == 0) goto done;
   if ((s->flags & SHR_RDONLY) == 0) goto done;
+  if ((s->flags & SHR_NONBLOCK) == 0) goto done;
 
   rc = 0;
 
@@ -469,7 +493,6 @@ struct shr *shr_open(char *file, unsigned flags) {
   assert( (flags & disallowed_flags) == 0);
 
   if (((flags & (SHR_RDONLY | SHR_WRONLY)) == 0)           || // must be r or w
-      ((flags & SHR_WRONLY) && (flags & SHR_SELECTFD))     || // unsupported
       ((flags & SHR_WRONLY) && (flags & SHR_LOCAL_OFFSET))) { // unsupported
     fprintf(stderr,"shr_open: invalid mode\n");
     goto done;
@@ -543,12 +566,7 @@ struct shr *shr_open(char *file, unsigned flags) {
 
   if (register_fifo(s) < 0) goto done;
   if (rescan_fifos(s) < 0) goto done;
-
-  /* in selectfd mode caller epolls on fd, then shr_read til wouldblock */
-  if ((flags & SHR_RDONLY) && (flags & SHR_SELECTFD)){
-    if (set_initial_readiness(s) < 0) goto done;
-    if (make_nonblock(s->bell_fd) < 0) goto done;
-  }
+  if (refresh_bell(s) < 0) goto done;
 
   rc = 0;
 
@@ -604,9 +622,11 @@ static int ring_bell(struct shr *s) {
 static int block(struct shr *s) {
   int rc = -1;
   ssize_t nr;
-  char b[4096]; /* any big buffer to reduce reads */
+  char b;
 
-  nr = read(s->bell_fd, b, sizeof(b));
+  if (make_blocking(s->bell_fd) < 0) goto done;
+
+  nr = read(s->bell_fd, &b, sizeof(b)); /* block */
   if (nr < 0) {
     if (errno == EINTR) rc = -2;
     else fprintf(stderr, "read: %s\n", strerror(errno));
@@ -633,7 +653,7 @@ static size_t get_msg_len(struct shr *s, size_t o) {
 
 /* 
  * this function is called under lock to forcibly reclaim space from the ring,
- * (SHR_LRU_DROP mode). The oldest portion of ring data is sacrificed.
+ * (SHR_DROP mode). The oldest portion of ring data is sacrificed.
  *
  * if this is a ring of messages (SHR_MESSAGES), preserve boundaries by 
  * moving the read position to the nearest message at or after delta bytes.
@@ -802,24 +822,15 @@ ssize_t shr_readv(shr *s, char *buf, size_t len, struct iovec *iov, int *iovcnt)
   rc = 0;
 
  done:
+
+  refresh_bell(s);
+
   if (rc == 0) {
-
-    /* our normal blocking mode block() does a read on the bell fifo. naturally,
-     * read clears the readable condition upon return. However in SELECTFD mode,
-     * the _caller_ performs the block itself (by a select/epoll on the fifo);
-     * thus we must do a read on the fifo here, to clear the readable condition
-     */
-    if (s->flags & SHR_SELECTFD) {
-      if (read(s->bell_fd, &b, sizeof(b)) < 0) {
-        if ((errno != EWOULDBLOCK) && (errno != EAGAIN))
-          fprintf(stderr,"read: %s\n", strerror(errno));
-      }
-    }
-
-    if (nr > 0) ring_bell(s);
+    if (nr > 0) ring_bell(s); /* ring peer bells if space freed */
     s->r->stat.br += (nr + (mc * sizeof(msg_len)));
     s->r->stat.mr += mc;
   }
+
   unlock(s->ring_fd);
   return (rc == 0) ? (ssize_t)nr : rc;
  
@@ -868,7 +879,7 @@ ssize_t shr_writev(shr *s, struct iovec *iov, int iovcnt) {
   
   a = r->n - r->u;      // total free space in ring
   if (len + hdr > a) {  // if more space is needed...
-    if (s->r->gflags & SHR_LRU_DROP) reclaim(s, len+hdr - a);
+    if (s->r->gflags & SHR_DROP) reclaim(s, len+hdr - a);
     else if (s->flags & SHR_NONBLOCK) { rc = 0; len = 0; goto done; }
     else goto block;
   }

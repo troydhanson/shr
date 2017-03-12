@@ -191,7 +191,7 @@ int main() {
   int pipe_to_r[2];
   int pipe_to_w[2];
 
-  shr_init(ring, ring_sz, SHR_MESSAGES|SHR_LRU_DROP);
+  shr_init(ring, ring_sz, SHR_MESSAGES|SHR_DROP);
 
   if (pipe(pipe_to_r) < 0) goto done;
 
