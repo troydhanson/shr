@@ -105,7 +105,7 @@ int main(int argc, char *argv[]) {
   switch(CF.mode) {
 
     case mode_create:
-      if (CF.size || CF.flags) usage();
+      if (CF.size == 0) usage();
       rc = shr_init(CF.ring, CF.size, CF.flags);
       if (rc < 0) goto done;
       break;
