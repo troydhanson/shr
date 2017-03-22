@@ -27,30 +27,48 @@ struct {
 };
 
 void usage() {
-  fprintf(stderr,"usage: %s [mode options] <ring>\n", CF.prog);
-  fprintf(stderr,"mode options:\n"
+  fprintf(stderr,"usage: %s [options] <ring>\n"
                  "\n"
-                 "  create ring\n"
+                 "[query mode ]: -q [default]\n"
+                 "  show ring metrics: bytes/message in ring, unread, etc\n"
                  "\n"
-                 "         -c [ -f <mode> ] -s <size>\n"
+                 "[read mode  ]: -r [-b 1]\n"
+                 "  displays ring data on stdout, hexdump to stderr (-b 1 to block)\n"
                  "\n"
-                 "  <size> may have k/m/g/t suffix (kilobytes,megabytes,etc)\n"
-                 "  <mode> is a combination of these (default: mdk)\n"
-                 "         m (message mode;  consider each read/write one message)\n"
-                 "         d (drop mode:     reclaim old, unread data when full)\n"
-                 "         k (keep existing; if it exists, leave ring as-is)\n"
-                 "         o (overwrite;     if it exists, resize and clear ring)\n"
+                 "[write mode ]: -w [-s <count>]\n"
+                 "  writes test data to ring, at 1x/second, til count is reached \n"
                  "\n"
-                 " dump metrics from ring:\n"
+                 "[create mode]: -c -s <size> [-f <mode>]\n"
+                 "  create ring of given size and mode\n"
+                 "  <size> in bytes with optional k/m/g/t suffix\n"
+                 "  <mode> bits (default: mdk)\n"
+                 "         m  message mode  (each read/write comprises a message)\n"
+                 "         d  drop mode     (drop unread data when full)\n"
+                 "         k  keep existing (if ring exists, leave as-is)\n"
+                 "         o  overwrite     (if ring exists, re-create)\n"
                  "\n"
-                 "         -q\n"
-                 "\n"
-                 "  read/write test data\n"
-                 "\n"
-                 "        -r [-b 0|1]     (read all data; -b 1 to block\n"
-                 "        -w [-s <count>] (write test data, once per sec)\n"
-                 "\n");
+                 "\n", CF.prog);
   exit(-1);
+}
+
+void hexdump(char *buf, size_t len) {
+  size_t i,n=0;
+  unsigned char c;
+  while(n < len) {
+    fprintf(stderr,"%08x ", (int)n);
+    for(i=0; i < 16; i++) {
+      c = (n+i < len) ? buf[n+i] : 0;
+      if (n+i < len) fprintf(stderr,"%.2x ", c);
+      else fprintf(stderr, "   ");
+    }
+    for(i=0; i < 16; i++) {
+      c = (n+i < len) ? buf[n+i] : ' ';
+      if (c < 0x20 || c > 0x7e) c = '.';
+      fprintf(stderr,"%c",c);
+    }
+    fprintf(stderr,"\n");
+    n += 16;
+  }
 }
 
 int main(int argc, char *argv[]) {
@@ -140,7 +158,10 @@ int main(int argc, char *argv[]) {
              (nr == 0) ? "end-of-data" : "error", nr); 
           goto done;
         } else {
-          printf("read %ld bytes: %.*s\n", nr, (int)nr, buf);
+          fprintf(stderr, "read %ld bytes\n", nr);
+          hexdump(buf,nr);                /* hex to stderr */
+          printf("%.*s\n", (int)nr, buf); /* ascii to stdout */
+          fflush(stdout);
         }
       }
       break;
