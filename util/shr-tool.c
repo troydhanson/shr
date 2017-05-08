@@ -74,7 +74,7 @@ void hexdump(char *buf, size_t len) {
 int main(int argc, char *argv[]) {
   int opt, rc=-1, sc, mode;
   CF.prog = argv[0];
-  char unit, *c, buf[100];
+  char unit, *c, buf[10000];
   struct shr_stat stat;
   ssize_t nr;
 

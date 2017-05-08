@@ -493,6 +493,8 @@ struct shr *shr_open(char *file, unsigned flags) {
   assert( (flags & disallowed_flags) == 0);
 
   if (((flags & (SHR_RDONLY | SHR_WRONLY)) == 0)           || // must be r or w
+      ((flags & SHR_RDONLY) && (flags & SHR_WRONLY))       || // only one of them
+
       ((flags & SHR_WRONLY) && (flags & SHR_LOCAL_OFFSET))) { // unsupported
     fprintf(stderr,"shr_open: invalid mode\n");
     goto done;
