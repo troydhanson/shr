@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <limits.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <assert.h>
 #include <dirent.h>
 #include <string.h>
@@ -32,7 +33,7 @@
  */
 #define R2W 0
 #define W2R 1
-static char magic[] = "shr_ring";
+static char magic[] = "libshr1";
 typedef struct {
   char magic[sizeof(magic)];
   int version;
@@ -46,10 +47,11 @@ typedef struct {
   size_t volatile o;        /* output pos (next read starts here)   */
   size_t volatile m;        /* unread msg count (SHR_MESSAGES mode) */
   struct shr_stat stat;     /* i/o stats       */
+  size_t app_data_len;      /* len of app region after d - opaque */
   char d[];                 /* ring data; C99 flexible array member */
 } shr_ctrl;
 
-/* the handle is given to each shr_open caller */
+/* the handle is given to each shr_open caller. it is opaque to the caller */
 struct shr {
   int ring_fd;
   int tmp_fd;
@@ -66,11 +68,6 @@ struct shr {
   };
 };
 
-
-static void oom_exit(void) {
-  fprintf(stderr, "out of memory\n");
-  abort();
-}
 
 /* get the lock on the ring file. we use a file lock for any read or write, 
  * since even the reader adjusts the position offsets in the ring buffer. note,
@@ -136,6 +133,7 @@ static int unlock(int fd) {
  *    SHR_KEEPEXIST - permits ring to exist already, leaves size/content
  *    SHR_MESSAGES  - ring i/o occurs in messages instead of byte stream
  *    SHR_DROP      - overwrite old ring data as ring fills, even if unread
+ *    SHR_APPDATA   - store supplemental "app data" in ring (buf,len args)
  *
  * returns 0 on success
  *        -1 on error
@@ -147,17 +145,25 @@ static int unlock(int fd) {
 int shr_init(char *file, size_t sz, unsigned flags, ...) {
   int rc = -1, fd = -1;
   char *buf = NULL;
+  char *app_data = NULL;
+  size_t app_sz = 0;
+
+  va_list ap;
+  va_start(ap, flags);
 
   size_t file_sz = sizeof(shr_ctrl) + sz;
 
-  if ((flags & SHR_OVERWRITE) && (flags & SHR_KEEPEXIST)) {
-    fprintf(stderr,"shr_init: incompatible flags\n");
+  if ((flags >= SHR_OPEN_FENCE) || (sz == 0) || 
+     ((flags & SHR_OVERWRITE) && (flags & SHR_KEEPEXIST))) {
+    fprintf(stderr,"shr_init: invalid parameters\n");
     goto done;
   }
 
-  if (file_sz < MIN_RING_SZ) {
-    fprintf(stderr,"shr_init: too small; min size: %ld\n", (long)MIN_RING_SZ);
-    goto done;
+  /* app data is stored opaquely after the ring */
+  if (flags & SHR_APPDATA) {
+    app_data = va_arg(ap, char *);
+    app_sz   = va_arg(ap, size_t);
+    file_sz += app_sz;
   }
 
   /* if ring exists already, flags determine behavior */
@@ -205,12 +211,15 @@ int shr_init(char *file, size_t sz, unsigned flags, ...) {
   r->i = 0;
   r->o = 0;
   r->m = 0;
-  r->n = file_sz - sizeof(*r);
+  r->n = sz;
 
   r->gflags = 0;
   if (flags & SHR_MESSAGES) r->gflags |= SHR_MESSAGES;
   if (flags & SHR_DROP) r->gflags |= SHR_DROP;
-  assert (flags < SHR_INIT_FENCE);
+  if (flags & SHR_APPDATA) {
+    if (app_sz) memcpy(r->d + r->n, app_data, app_sz);
+    r->app_data_len = app_sz;
+  }
 
   rc = 0;
 
@@ -218,6 +227,7 @@ int shr_init(char *file, size_t sz, unsigned flags, ...) {
   if ((rc == -1) && (fd != -1)) unlink(file);
   if (fd != -1) close(fd);
   if (buf && (buf != MAP_FAILED)) munmap(buf, file_sz);
+  va_end(ap);
   return rc;
 }
 
@@ -256,14 +266,16 @@ int shr_stat(shr *s, struct shr_stat *stat, struct timeval *reset) {
 
 static int validate_ring(struct shr *s) {
   int rc = -1;
+  shr_ctrl *r = s->r;
+  ssize_t sz, exp_sz;
 
   if (s->s.st_size < (off_t)MIN_RING_SZ)       { rc = -2; goto done; }
   if (memcmp(s->r->magic,magic,sizeof(magic))) { rc = -3; goto done; }
 
-  shr_ctrl *r = s->r;
-  size_t sz = s->s.st_size - sizeof(shr_ctrl);
+  exp_sz = sizeof(shr_ctrl) + r->n + r->app_data_len; /* expected sz */
+  sz = s->s.st_size;                                  /* actual sz */
 
-  if (sz != r->n)   {rc = -4; goto done; } /* file_sz - overhead != data size */
+  if (sz != exp_sz) {rc = -4; goto done; } /* size not expected */
   if (r->u >  r->n) {rc = -5; goto done; } /* used > size */
   if (r->i >= r->n) {rc = -6; goto done; } /* input position >= size */
   if (r->o >= r->n) {rc = -7; goto done; } /* output position >= size */
@@ -485,23 +497,49 @@ static int rescan_fifos(shr *s) {
   return rc;
 }
 
-struct shr *shr_open(char *file, unsigned flags) {
+/*
+ * shr_open opens a ring 
+ *
+ * the ring is opened for reading only OR writing only, and must exist already
+ *
+ * flags:
+ *    SHR_RDONLY      - open for reading 
+ *    SHR_WRONLY      - open for writing
+ *    SHR_GET_APPDATA - obtain "app data" pointer (char **buf, size_t *len args)
+ *                      note, the app data has no particular memory alignment,
+ *                      so, if a caller wants to overlay a struct on it, it
+ *                      should copy the app data into a suitably aligned buffer.
+ *                      also, the app data memory buffer is considered read-only
+ *                      since it points into shared memory that was initialized
+ *                      at ring creation. the app data pointer is valid only as
+ *                      long as the caller has the ring open- until shr_close.
+ *
+ * returns opaque struct shr pointer on success, or NULL on error
+ *
+ */
+struct shr *shr_open(char *file, unsigned flags, ...) {
   struct shr *s = NULL;
   int rc = -1, vc, i;
+  char **app_data;
+  size_t *app_sz;
+
+  va_list ap;
+  va_start(ap, flags);
 
   unsigned disallowed_flags = SHR_OPEN_FENCE-1;
-  assert( (flags & disallowed_flags) == 0);
 
-  if (((flags & (SHR_RDONLY | SHR_WRONLY)) == 0)           || // must be r or w
-      ((flags & SHR_RDONLY) && (flags & SHR_WRONLY))       || // only one of them
-
-      ((flags & SHR_WRONLY) && (flags & SHR_LOCAL_OFFSET))) { // unsupported
+  if (((flags & SHR_RDONLY) && (flags & SHR_WRONLY)) || /* both r AND w    */
+      ((flags & (SHR_RDONLY | SHR_WRONLY)) == 0)     || /* neither r NOR w */
+      (flags & disallowed_flags)) {                     /* other bad flags */
     fprintf(stderr,"shr_open: invalid mode\n");
     goto done;
   }
 
   s = malloc( sizeof(struct shr) );
-  if (s == NULL) oom_exit();
+  if (s == NULL) {
+    fprintf(stderr, "out of memory\n");
+    goto done;
+  }
   memset(s, 0, sizeof(*s));
   s->ring_fd = -1;
   s->tmp_fd = -1;
@@ -570,6 +608,13 @@ struct shr *shr_open(char *file, unsigned flags) {
   if (rescan_fifos(s) < 0) goto done;
   if (refresh_bell(s) < 0) goto done;
 
+  if (flags & SHR_GET_APPDATA) {
+    app_data = va_arg(ap, char **);
+    app_sz   = va_arg(ap, size_t*);
+    *app_data = s->r->app_data_len ? (s->r->d + s->r->n) : NULL;
+    *app_sz = s->r->app_data_len;
+  }
+
   rc = 0;
 
  done:
@@ -583,6 +628,7 @@ struct shr *shr_open(char *file, unsigned flags) {
     free(s);
     s = NULL;
   }
+  va_end(ap);
   return s;
 }
 

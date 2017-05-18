@@ -74,8 +74,9 @@ void hexdump(char *buf, size_t len) {
 int main(int argc, char *argv[]) {
   int opt, rc=-1, sc, mode;
   CF.prog = argv[0];
-  char unit, *c, buf[10000];
+  char unit, *c, buf[10000], *app_data;
   struct shr_stat stat;
+  size_t app_len;
   ssize_t nr;
 
   while ( (opt = getopt(argc,argv,"vhcs:qf:wrb:")) > 0) {
@@ -129,7 +130,8 @@ int main(int argc, char *argv[]) {
       break;
 
     case mode_status:
-      CF.shr = shr_open(CF.ring, SHR_RDONLY);
+      CF.shr = shr_open(CF.ring, SHR_RDONLY | SHR_GET_APPDATA, 
+                        &app_data, &app_len);
       if (CF.shr == NULL) goto done;
       rc = shr_stat(CF.shr, &stat, NULL);
       if (rc < 0) goto done;
@@ -144,6 +146,7 @@ int main(int argc, char *argv[]) {
              " messages-ready %ld\n",
          stat.bw, stat.br, stat.bd, stat.mw, stat.mr, stat.md, stat.bn,
          stat.bu, stat.mu);
+      if (app_len) printf(" app-data: %lu bytes\n", (unsigned long)app_len);
       break;
 
     case mode_read:
