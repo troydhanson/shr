@@ -38,7 +38,7 @@ void usage() {
                  "[write mode ]: -w [-s <count>]\n"
                  "  writes test data to ring, at 1x/second, til count is reached \n"
                  "\n"
-                 "[create mode]: -c -s <size> [-f <mode>]\n"
+                 "[create mode]: -c -s <size> [-m <mode>]\n"
                  "  create ring of given size and mode\n"
                  "  <size> in bytes with optional k/m/g/t suffix\n"
                  "  <mode> bits (default: mdk)\n"
@@ -79,7 +79,7 @@ int main(int argc, char *argv[]) {
   size_t app_len;
   ssize_t nr;
 
-  while ( (opt = getopt(argc,argv,"vhcs:qf:wrb:")) > 0) {
+  while ( (opt = getopt(argc,argv,"vhcs:qm:wrb:")) > 0) {
     switch(opt) {
       case 'v': CF.verbose++; break;
       case 'h': default: usage(); break;
@@ -101,7 +101,7 @@ int main(int argc, char *argv[]) {
             }
          }
          break;
-      case 'f': /* ring mode */
+      case 'm': /* ring mode */
          CF.flags = 0; /* override default */
          c = optarg;
          while((*c) != '\0') {
