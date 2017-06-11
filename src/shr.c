@@ -1,4 +1,7 @@
-/* #define _GNU_SOURCE */ /* now defined via AC_GNU_SOURCE in configure.ac */
+/* _GNU_SOURCE defined via AC_GNU_SOURCE in configure.ac */
+#ifndef _GNU_SOURCE 
+#define _GNU_SOURCE 
+#endif
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
