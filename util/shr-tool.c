@@ -35,8 +35,8 @@ void usage() {
                  "[read mode  ]: -r [-b 1]\n"
                  "  displays ring data on stdout, hexdump to stderr (-b 1 to block)\n"
                  "\n"
-                 "[write mode ]: -w [-s <count>]\n"
-                 "  writes test data to ring, at 1x/second, til count is reached \n"
+                 "[write mode ]: -w\n"
+                 "  writes data to ring, from lines of stdin until eof\n"
                  "\n"
                  "[create mode]: -c -s <size> [-m <mode>]\n"
                  "  create ring of given size and mode\n"
@@ -74,7 +74,7 @@ void hexdump(char *buf, size_t len) {
 int main(int argc, char *argv[]) {
   int opt, rc=-1, sc, mode;
   CF.prog = argv[0];
-  char unit, *c, buf[10000], *app_data;
+  char unit, *c, buf[10000], *app_data, line[1000];
   struct shr_stat stat;
   size_t app_len;
   ssize_t nr;
@@ -172,13 +172,13 @@ int main(int argc, char *argv[]) {
     case mode_write:
       CF.shr = shr_open(CF.ring, SHR_WRONLY);
       if (CF.shr == NULL) goto done;
-      if (CF.size == 0) CF.size++;
-      while (CF.size--) {
-        time_t now = time(NULL);
-        char *tstr = asctime(localtime(&now));
-        nr = strlen(tstr);
-        if (shr_write(CF.shr, tstr, nr) < 0) goto done;
-        if (CF.size) sleep(1);
+      while (fgets(line, sizeof(line), stdin)) {
+        nr = strlen(line);
+        if ((nr > 0) && (line[nr-1] == '\n')) line[nr--] = '\0';
+        if (shr_write(CF.shr, line, nr) < 0) {
+          fprintf(stderr, "shr_write: error\n");
+          goto done;
+        }
       }
       break;
 
