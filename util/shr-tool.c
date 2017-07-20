@@ -27,19 +27,20 @@ struct {
 };
 
 void usage() {
-  fprintf(stderr,"usage: %s [options] <ring>\n"
+  fprintf(stderr,"usage: %s <mode> [options] <ring>\n"
                  "\n"
-                 "[query mode ]: -q [default]\n"
+                 "[query mode ]: -q  <ring>\n"
                  "  show ring metrics: bytes/message in ring, unread, etc\n"
+                 "  this is the default mode\n"
                  "\n"
-                 "[read mode  ]: -r [-b 1]\n"
+                 "[read mode  ]: -r [-b 1] <ring>\n"
                  "  displays ring data on stdout, hexdump to stderr (-b 1 to block)\n"
                  "\n"
-                 "[write mode ]: -w\n"
+                 "[write mode ]: -w <ring>\n"
                  "  writes data to ring, from lines of stdin until eof\n"
                  "\n"
-                 "[create mode]: -c -s <size> [-m <mode>]\n"
-                 "  create ring of given size and mode\n"
+                 "[create mode]: -c -s <size> [-m <mode>] <ring> [<ring> ...]\n"
+                 "  create ring(s) of given size and mode\n"
                  "  <size> in bytes with optional k/m/g/t suffix\n"
                  "  <mode> bits (default: mdk)\n"
                  "         m  message mode  (each read/write comprises a message)\n"
@@ -118,15 +119,17 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  if (optind < argc) CF.ring = argv[optind++];
+  if (optind < argc) CF.ring = argv[optind];
   if (CF.ring == NULL) usage();
   
   switch(CF.mode) {
 
     case mode_create:
       if (CF.size == 0) usage();
-      rc = shr_init(CF.ring, CF.size, CF.flags);
-      if (rc < 0) goto done;
+      while (optind < argc) {
+        rc = shr_init(argv[optind++], CF.size, CF.flags);
+        if (rc < 0) goto done;
+      }
       break;
 
     case mode_status:
