@@ -9,7 +9,7 @@
 #include "shr.h"
 
 /* 
- * shr test tool
+ * shr tool
  *
  */
 
@@ -17,39 +17,55 @@ struct {
   char *prog;
   int verbose;
   char *ring;
-  enum {mode_status, mode_create, mode_write, mode_read, mode_tee} mode;
+  enum {mode_status,
+        mode_create,
+        mode_write,
+        mode_write_hex,
+        mode_read,
+        mode_read_hex,
+        mode_tee} mode;
   struct shr *shr;
   size_t size;
   int flags;
   int block;
+  char *hex_arg;
 } CF = {
   .flags = SHR_KEEPEXIST | SHR_MESSAGES | SHR_DROP,
 };
 
 void usage() {
-  fprintf(stderr,"usage: %s <mode> [options] <ring>\n"
+  fprintf(stderr,"usage: %s <mode-options>\n"
                  "\n"
-                 "[query mode ]: -q  <ring>\n"
-                 "  show ring metrics: bytes/message in ring, unread, etc\n"
-                 "  this is the default mode\n"
+                 "query mode - show ring metrics (default)\n"
+                 "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n"
+                 "  -q  <ring>\n"
                  "\n"
-                 "[read mode  ]: -r [-b 1] <ring>\n"
-                 "  displays ring data on stdout, hexdump to stderr (-b 1 to block)\n"
+                 "read mode - display ring data\n"
+                 "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n"
+                 "  -r  <ring>   (display ring data on stdout)\n"
+                 "  -rr <ring>   (dump ring data in hex on stderr)\n"
+                 "  -b1          (block awaiting incoming data)\n"
                  "\n"
-                 "[write mode ]: -w <ring>\n"
-                 "  writes data to ring, from lines of stdin until eof\n"
+                 "write mode - put data in ring\n"
+                 "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n"
+                 "  -w <ring>       (from lines of stdin until eof)\n"
+                 "  -W <hex> <ring> (from given hexascii argument)\n"
                  "\n"
-                 "[tee mode ]: -t <input-ring> <output-ring> <output-ring>\n"
-                 "  tee's one ring into two output rings\n"
+                 "tee mode - tee one ring to two rings\n"
+                 "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n"
+                 "  -t <ring> <out1> <out2>\n"
                  "\n"
-                 "[create mode]: -c -s <size> [-m <mode>] <ring> [<ring> ...]\n"
-                 "  create ring(s) of given size and mode\n"
-                 "  <size> in bytes with optional k/m/g/t suffix\n"
-                 "  <mode> bits (default: mdk)\n"
-                 "         m  message mode  (each read/write comprises a message)\n"
-                 "         d  drop mode     (drop unread data when full)\n"
-                 "         k  keep existing (if ring exists, leave as-is)\n"
-                 "         o  overwrite     (if ring exists, re-create)\n"
+                 "create mode -  create ring of given size and mode\n"
+                 "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n"
+                 "  -c -s <size> <ring> [<ring>]\n"
+                 "\n"
+                 "  <size> with kmgt suffix (kb,mb,gb,tb)\n"
+                 "\n"
+                 "  -m <mode> (mode bits for ring creation; default: mdk)\n"
+                 "     m  messages      (each read/write comprises a message)\n"
+                 "     d  auto-drop     (unread data drops when space needed)\n"
+                 "     k  keep existing (an existing ring is left untouched)\n"
+                 "     o  overwrite     (an existing ring is overwritten)\n"
                  "\n"
                  "\n", CF.prog);
   exit(-1);
@@ -75,6 +91,34 @@ void hexdump(char *buf, size_t len) {
   }
 }
 
+/* unhexer, overwrites input space;
+ * returns number of bytes or -1 */
+int unhex(char *h) {
+  char b;
+  int rc = -1;
+  unsigned u;
+  size_t i, len = strlen(h);
+
+  if (len == 0) goto done;
+  if (len &  1) goto done; /* odd number of digits */
+  for(i=0; i < len; i += 2) {
+    if (sscanf( &h[i], "%2x", &u) < 1) goto done;
+    assert(u <= 255);
+    b = (unsigned char)u;
+    h[i/2] = b;
+  }
+
+  rc = 0;
+
+ done:
+  if (rc < 0) {
+    fprintf(stderr, "hex conversion failed\n");
+    return -1;
+  }
+
+  return len/2;
+}
+
 int main(int argc, char *argv[]) {
   int opt, rc=-1, sc, mode;
   CF.prog = argv[0];
@@ -85,7 +129,7 @@ int main(int argc, char *argv[]) {
   size_t app_len;
   ssize_t nr;
 
-  while ( (opt = getopt(argc,argv,"vhcs:qm:wrtb:")) > 0) {
+  while ( (opt = getopt(argc,argv,"vhcs:qm:wW:r+tb:")) > 0) {
     switch(opt) {
       case 'v': CF.verbose++; break;
       case 'h': default: usage(); break;
@@ -93,7 +137,8 @@ int main(int argc, char *argv[]) {
       case 'c': CF.mode=mode_create; break;
       case 'q': CF.mode=mode_status; break;
       case 'w': CF.mode=mode_write; break;
-      case 'r': CF.mode=mode_read; break;
+      case 'W': CF.mode=mode_write_hex; CF.hex_arg = strdup(optarg); break;
+      case 'r': CF.mode = (CF.mode==mode_read) ? mode_read_hex : mode_read; break;
       case 't': CF.mode=mode_tee; break;
       case 's':  /* ring size */
          sc = sscanf(optarg, "%ld%c", &CF.size, &unit);
@@ -131,8 +176,7 @@ int main(int argc, char *argv[]) {
   switch(CF.mode) {
 
     case mode_tee:
-      CF.shr = shr_open(CF.ring, SHR_RDONLY | SHR_GET_APPDATA, 
-                        &app_data, &app_len);
+      CF.shr = shr_open(CF.ring, SHR_RDONLY );
       if (CF.shr == NULL) goto done;
       if (++optind < argc) ring1 = argv[optind];
       if (++optind < argc) ring2 = argv[optind];
@@ -188,6 +232,7 @@ int main(int argc, char *argv[]) {
       break;
 
     case mode_read:
+    case mode_read_hex:
       mode = SHR_RDONLY;
       if (CF.block == 0) mode |= SHR_NONBLOCK;
       CF.shr = shr_open(CF.ring, mode);
@@ -199,10 +244,9 @@ int main(int argc, char *argv[]) {
              (nr == 0) ? "end-of-data" : "error", nr); 
           goto done;
         } else {
-          fprintf(stderr, "read %ld bytes\n", nr);
-          hexdump(buf,nr);                /* hex to stderr */
-          printf("%.*s\n", (int)nr, buf); /* ascii to stdout */
-          fflush(stdout);
+          if (CF.verbose) fprintf(stderr, "read %ld bytes\n", nr);
+          if (CF.mode == mode_read_hex) hexdump(buf,nr);
+          else { printf("%.*s\n", (int)nr, buf); fflush(stdout); }
         }
       }
       break;
@@ -220,6 +264,17 @@ int main(int argc, char *argv[]) {
       }
       break;
 
+    case mode_write_hex:
+      CF.shr = shr_open(CF.ring, SHR_WRONLY);
+      if (CF.shr == NULL) goto done;
+      nr = unhex(CF.hex_arg);
+      if (nr <= 0) goto done;
+      if (shr_write(CF.shr, CF.hex_arg, nr) < 0) {
+        fprintf(stderr, "shr_write: error\n");
+        goto done;
+      }
+      break;
+
     default: 
       assert(0);
       break;
@@ -231,5 +286,6 @@ int main(int argc, char *argv[]) {
   if (CF.shr) shr_close(CF.shr);
   if (o1) shr_close(o1);
   if (o2) shr_close(o2);
+  if (CF.hex_arg) free(CF.hex_arg);
   return rc;
 }
