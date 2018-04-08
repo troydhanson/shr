@@ -116,14 +116,15 @@ int handle_signal(void) {
 }
 
 int handle_io(void) {
-  int rc = -1, iovcnt;
+  int rc = -1;
   ssize_t rv, wc;
+  size_t iovcnt;
 
   iovcnt = BATCH_FRAMES;
   rv = shr_readv(cfg.ring, cfg.buf, BATCH_BYTES, cfg.iov, &iovcnt);
   if (rv < 0) fprintf(stderr, "shr_readv: error\n");
   if (rv > 0) {
-    if (cfg.verbose) fprintf(stderr,"shr_readv: %d frames\n", iovcnt);
+    if (cfg.verbose) fprintf(stderr,"shr_readv: %zu frames\n", iovcnt);
     /* TODO process data */
   }
 

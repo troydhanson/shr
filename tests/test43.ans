@@ -4,9 +4,9 @@ w: open
 r: open
 w: writev
 w: stat: 0
-w: bw 30, br 0, mw 2, mr 0, md 0, bd 0, bn 31, bu 30, mu 2
+w: bw 14, br 0, mw 2, mr 0, md 0, bd 0, bn 15, bu 14, mu 2
 w: stat: 0
-w: bw 0, br 30, mw 0, mr 2, md 0, bd 0, bn 31, bu 0, mu 0
+w: bw 0, br 14, mw 0, mr 2, md 0, bd 0, bn 15, bu 0, mu 0
 w: close
 r: close
 w: eof

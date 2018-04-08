@@ -2,54 +2,44 @@
 #include <unistd.h>
 #include "shr.h"
 
-/* this test shows that partial writes are rejected; always full or error */
+char *ring = "/dev/shm/" __FILE__ ".ring";
 
-char *ring = __FILE__ ".ring";
-char *data = "abcdefghi";
-
-char out[10];
+struct app_data {
+  int counter;
+} ad, od;
 
 int main() {
- struct shr *s=NULL,*t=NULL;
- ssize_t nr;
- int rc = -1;
+ setlinebuf(stdout);
+ struct shr *s = NULL;
+ int rc = -1, sc;
+ void *p;
+ size_t sz = sizeof(ad);
 
  unlink(ring);
- if (shr_init(ring, 4, 0) < 0) goto done; /* only 4 capacity */
+
+ sc = shr_init(ring, 8, SHR_APPDATA, &ad, sizeof(ad));
+ if (sc < 0) goto done;
 
  s = shr_open(ring, SHR_RDONLY);
  if (s == NULL) goto done;
 
- t = shr_open(ring, SHR_WRONLY|SHR_NONBLOCK);
- if (t == NULL) goto done;
+ p = &od;
+ ad.counter = 1;
+ sc = shr_appdata(s, &p, &ad, &sz);
+ if (sc < 0) goto done;
+ printf("app_data: was %d\n", od.counter);
+ printf("app_data: now %d\n", ad.counter);
 
- printf("writing ...");
- nr = shr_write(t, &data[0], 3);    /* write 3 ok */
- printf("%s\n", (nr < 0) ? "fail" : ((nr == 0) ? "would block" : "ok"));
-
- printf("writing ...");
- nr = shr_write(t, &data[3], 3); /* fails- can't write 3 more */
- printf("%s\n", (nr < 0) ? "fail" : ((nr == 0) ? "would block" : "ok"));
-
- printf("writing ...");
- nr = shr_write(t, &data[3], 2); /* fails- can't write 2 more */
- printf("%s\n", (nr < 0) ? "fail" : ((nr == 0) ? "would block" : "ok"));
-
- printf("writing ...");
- nr = shr_write(t, &data[3], 1); /* ok - can write 1 more */
- printf("%s\n", (nr < 0) ? "fail" : ((nr == 0) ? "would block" : "ok"));
-
- printf("reading ...");
- nr = shr_read(s, out, sizeof(out));
- if (nr < 0) goto done;
- printf("read %ld bytes\n", (long)nr);
- if (nr > 0) printf("%.*s\n", (int)nr, out);
+ ad.counter = 2;
+ sc = shr_appdata(s, &p, &ad, &sz);
+ if (sc < 0) goto done;
+ printf("app_data: was %d\n", od.counter);
+ printf("app_data: now %d\n", ad.counter);
 
  rc = 0;
 
 done:
- printf("end\n");
  if (s) shr_close(s);
- if (t) shr_close(t);
+ unlink(ring);
  return rc;
 }

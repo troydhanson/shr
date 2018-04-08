@@ -3,31 +3,31 @@ w: ready
 w: open
 r: open
 w: stat: 0
-w: bw 0, br 0, mw 0, mr 0, md 0, bd 0, bn 31, bu 0 mu 0
+w: bw 0, br 0, mw 0, mr 0, md 0, bd 0, bn 15, bu 0 mu 0
 w: write
 w: stat: 0
-w: bw 15, br 0, mw 1, mr 0, md 0, bd 0, bn 31, bu 15 mu 1
+w: bw 7, br 0, mw 1, mr 0, md 0, bd 0, bn 15, bu 7 mu 1
 w: write
 w: stat: 0
-w: bw 30, br 0, mw 2, mr 0, md 0, bd 0, bn 31, bu 30 mu 2
+w: bw 14, br 0, mw 2, mr 0, md 0, bd 0, bn 15, bu 14 mu 2
 w: write
 w: stat: 0
-w: bw 45, br 0, mw 3, mr 0, md 1, bd 15, bn 31, bu 30 mu 2
+w: bw 21, br 0, mw 3, mr 0, md 1, bd 7, bn 15, bu 14 mu 2
 r: read
 r: rc = 7
 r: [abcdef]
 w: stat: 0
-w: bw 45, br 15, mw 3, mr 1, md 1, bd 15, bn 31, bu 15 mu 1
+w: bw 21, br 7, mw 3, mr 1, md 1, bd 7, bn 15, bu 7 mu 1
 r: read
 r: rc = 7
 r: [abcdef]
 w: stat: 0
-w: bw 45, br 30, mw 3, mr 2, md 1, bd 15, bn 31, bu 0 mu 0
+w: bw 21, br 14, mw 3, mr 2, md 1, bd 7, bn 15, bu 0 mu 0
 r: read
 r: rc = 0
 r: wouldblock
 w: stat: 0
-w: bw 45, br 30, mw 3, mr 2, md 1, bd 15, bn 31, bu 0 mu 0
+w: bw 21, br 14, mw 3, mr 2, md 1, bd 7, bn 15, bu 0 mu 0
 w: close
 r: close
 w: eof

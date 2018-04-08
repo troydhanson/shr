@@ -1,0 +1,39 @@
+This small library is for a set of unrelated processes to implement a blocking-
+awakening relationship. If the processes were related we could use an eventfd.
+For unrelated processes, tcp or udp or unix sockets or named pipes would all
+work, or POSIX sempahores or message queues.  As explained below, I've chosen
+to use unix domain datagram sockets, in the linux abstract socket namespace.
+
+The use case for this library, is when two or more processes share some
+external resource, and need to communicate availability (say, of new
+data) in the resource.  The process who puts the new data into the resource
+wakes up the processes waiting for it. In this use case, the shared resource is
+accessed under lock by only one process at a time.
+
+This little library is designed for loosely coupled processes. That means, the
+processes that block, and the process that wakes up the blockers, work fine if
+the peers go away, don't exist in the first place, or come into existence late.
+
+In this design, it's also fine if the waker wakes the blocker spuriously (too
+many times, or when there is no reason to be awakened); these things can happen
+due to messages being produced and consumed by multiple processes and in
+batches, etc.  It is easier to design for spurious wakeups than to root out all
+ways they can happen.
+
+Besides loose coupling, my goals were:
+
+- epoll / select / poll compatibility 
+- clean up of any resources/artifacts when the blockers/wakers exit
+- traceability for debugging (e.g. trace PID that sent a wakeup)
+
+These three goals exclude a sem_wait based solution. Besides, semaphores would
+also introduce a pthreads dependendency.
+
+POSIX message queues are epoll-compatible on Linux.  Unfortunately they have
+kernel persistence.  That conflicts with my goal of having the artifacts (in
+the case of semaphores, /dev/shm files) released automatically if the process
+exits abnormally.
+
+By using unix domain datagram sockets, with autobind, in the abstract
+namespace, the kernel generates a unique identity for each waiting caller.
+Furthermore an abstract socket goes away automatically when the caller exits.

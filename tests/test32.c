@@ -23,9 +23,9 @@ char msg[]  =      "1234567890abcdefghijklmnopqrstuvwxyz"
 int nmsg = 1000000;
 
 /* this ring sz forces the second message to wrap after its prefix */
-#define ring_sz (sizeof(size_t) + sizeof(msg) + sizeof(size_t) )
+#define ring_sz (sizeof(size_t) + sizeof(msg) + 0 )
 
-char *ring = __FILE__ ".ring";
+char *ring = "/dev/shm/" __FILE__ ".ring";
 
 void delay() { usleep(50000); }
 
@@ -207,6 +207,7 @@ void w(int fd) {
 } while(0)
 
 int main() {
+  setlinebuf(stdout);
   int rc = 0;
   pid_t rpid,wpid,pid;
 
@@ -216,7 +217,7 @@ int main() {
   int pipe_to_r[2];
   int pipe_to_w[2];
 
-  shr_init(ring, ring_sz, SHR_MESSAGES);
+  shr_init(ring, ring_sz, 0);
 
   if (pipe(pipe_to_r) < 0) goto done;
 

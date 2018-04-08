@@ -1,14 +1,27 @@
-r: ready
-w: ready
-1000000 msgs total 361000000 bytes
-writing
-w: open
-w: fill
-w: close
-w: eof
-reading
-r: open
-r: empty
-r: close
-r: eof
+w: do_open
+r: do_open
+w: do_fill
+w: wrote 10 messages (to seq 10)
+r: do_read_one
+0
+w: do_fill
+w: wrote 10 messages (to seq 20)
+r: do_read_one
+10
+r: do_read_one
+11
+f: do_open
+f: do_read_one
+10
+f: do_read_one
+11
+w: do_close
+r: do_close
+f: do_close
+w: do_exit
+w: exiting
+f: do_exit
+f: exiting
+r: do_exit
+r: exiting
 end

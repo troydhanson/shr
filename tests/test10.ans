@@ -1,8 +1,33 @@
-writing ...wrote 3 bytes
-ok
-writing ...wrote 3 bytes
-ok
-reading ...read 6 bytes
-abcdef
-reading ...read 0 bytes
+w: do_open
+f: do_open
+r: do_open
+w: do_fill
+w: wrote 10 messages (to seq 10)
+f: do_read_one
+0
+r: do_read_half
+0
+1
+2
+3
+4
+w: do_fill
+w: wrote 10 messages (to seq 20)
+f: do_read_one
+10
+r: do_read_one
+10
+f: do_farm_stat
+drops: 9
+r: do_farm_stat
+drops: 5
+w: do_close
+f: do_close
+r: do_close
+w: do_exit
+w: exiting
+f: do_exit
+f: exiting
+r: do_exit
+r: exiting
 end

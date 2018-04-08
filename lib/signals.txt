@@ -1,0 +1,48 @@
+Signals
+
+This refers to an older version of bw-tool that did not use signalfd and epoll.
+It describes how signals affect a program blocked in select.
+
+Example 1 SIGHUP (termination in default signal handler)
+
+The HUP signal has a default signal handler that causes process termination.
+
+    % bw-tool -r blob make
+    % bw-tool -r blob wait       # in terminal window 1
+    % kill -HUP $(pidof bw-tool) # in terminal window 2
+
+Internally waitlib is blocked in select when the signal occurs. (Nowadays
+waitlib uses epoll, but the principle is the same). Under strace, this is
+observed:
+
+    select(5, [4], NULL, ...) = ? ERESTARTNOHAND (To be restarted if no handler)
+    --- SIGHUP {si_signo=SIGHUP, si_code=SI_USER, si_pid=45616, si_uid=1000} ---
+    +++ killed by SIGHUP +++
+
+The program terminated due to the default handler.
+
+Example 2 SIGWINCH (no signal handler, automatic restart of system call)
+
+    % bw-tool -r blob make
+    % bw-tool -r blob wait         # in terminal window 1
+    % kill -WINCH $(pidof bw-tool) # in terminal window 2
+
+An application has no signal handlers explicitly installed.  Internally waitlib
+is blocked in select when the signal occurs. Under strace, this is observed:
+
+    select(5, [4], NULL, ...) = ? ERESTARTNOHAND (To be restarted if no handler)
+    --- SIGWINCH {si_signo=SIGWINCH, si_code=SI_USER, si_pid=45616, si_uid=1000}
+    select(5, [4], NULL, NULL, NULL
+
+As strace shows, the select was restarted; it never returned.
+
+---
+
+In new programs that use waitlib - the preferred strategy is to block all 
+signals with sigprocmask. Establish a signal set that the application wants
+to receive and create a signalfd from it. Use epoll to monitor the signalfd
+and the descriptor from waitlib, for a wait-mode caller. If the application
+uses `bw_wait_ul` to block (rather than its own epoll loop), utilize bw_ctl
+ahead of time to provide the signalfd as a secondary descriptor to monitor.
+
+

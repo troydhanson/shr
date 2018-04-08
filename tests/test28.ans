@@ -1,7 +1,3 @@
-r: ready
-w: ready
-w: open
-r: open
-close
-close
-end
+init
+shr_read: -3
+ok

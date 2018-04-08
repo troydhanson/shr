@@ -1,0 +1,35 @@
+w: do_open
+f: do_open
+r: do_open
+w: do_fill
+w: wrote 10 messages (to seq 10)
+f: do_read_half
+0
+1
+2
+3
+4
+f: do_read_half
+5
+6
+7
+8
+9
+f: do_read_half
+w: do_fill
+w: wrote 10 messages (to seq 20)
+10
+11
+12
+13
+14
+w: do_close
+f: do_close
+r: do_close
+w: do_exit
+w: exiting
+f: do_exit
+f: exiting
+r: do_exit
+r: exiting
+end

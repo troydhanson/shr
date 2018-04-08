@@ -13,7 +13,7 @@ char msg[] = "abc";
 #define ring_sz (sizeof(msg)*10)
 #define adim(a) (sizeof(a)/sizeof(*a))
 
-char *ring = __FILE__ ".ring";
+char *ring = "/dev/shm/" __FILE__ ".ring";
 
 void delay() { usleep(50000); }
 
@@ -75,10 +75,10 @@ void r(int fd) {
         printf("r: readv\n");
         struct iovec io[10], *ov;
         char buf[8];
-        int niov = adim(io);
+        size_t niov = adim(io);
         rc = shr_readv(s, buf, sizeof(buf), io, &niov);
         printf("r: rc %d\n", rc);
-        printf("r: niov %d\n", niov);
+        printf("r: niov %zu\n", niov);
         if (rc > 0) {
           ov = io;
           while(niov--) {
@@ -183,6 +183,7 @@ void w(int fd) {
 } while(0)
 
 int main() {
+  setlinebuf(stdout);
   int rc = 0;
   pid_t rpid,wpid;
 
@@ -192,7 +193,7 @@ int main() {
   int pipe_to_r[2];
   int pipe_to_w[2];
 
-  shr_init(ring, ring_sz, SHR_MESSAGES);
+  shr_init(ring, ring_sz, 0);
 
   if (pipe(pipe_to_r) < 0) goto done;
 

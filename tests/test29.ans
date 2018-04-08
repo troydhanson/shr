@@ -1,10 +1,4 @@
-r: ready
-w: ready
-w: open
-r: open
-r: get selectable fd
-w: close
-w: eof
-r: close
-r: eof
-end
+init
+shr_write: 100
+shr_write: -3
+ok

@@ -1,0 +1,13 @@
+w: do_open
+w: do_fill
+w: wrote 370000 bytes / 10000 messages
+w: do_close
+w: do_exit
+w: exiting
+r: do_open
+r: do_read
+read 10000 messages
+r: do_close
+r: do_exit
+r: exiting
+end

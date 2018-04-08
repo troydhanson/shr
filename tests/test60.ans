@@ -4,14 +4,5 @@ getting selectable fd
 selecting...
 select: ready
 read
-r: [a]
+r: [-2] (buf too small)
 select: ready
-read
-r: [b]
-select: ready
-read
-r: [c]
-select: timeout
-read
-r: wouldblock
-select: timeout

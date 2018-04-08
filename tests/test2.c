@@ -2,9 +2,10 @@
 #include <unistd.h>
 #include "shr.h"
 
-char *ring = __FILE__ ".ring";
+char *ring = "/dev/shm/" __FILE__ ".ring";
 
 int main() {
+  setlinebuf(stdout);
  struct shr *s=NULL;
  int rc = -1;
 
@@ -18,5 +19,6 @@ int main() {
 
 done:
  if (s) shr_close(s);
+ unlink(ring);
  return rc;
 }

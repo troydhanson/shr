@@ -1,26 +1,17 @@
-r: ready
-w: ready
-r: open
-w: open
-w: write
-r: read
-r: [sq]
-r: read
-r: [ui]
-r: read
-r: [rr]
-r: read
-r: [el]
-r: read
-r: []
-w: write
-r: read
-r: [sq]
-r: read
-r: [ui]
-w: unlink
-w: close
-r: close
-w: eof
-r: eof
+w: do_open
+w: do_fill
+w: wrote 10 messages (to seq 10)
+w: do_fill
+w: wrote 10 messages (to seq 20)
+r: do_open
+r: do_read_one
+10
+w: do_close
+r: do_close
+w: do_exit
+w: exiting
+f: do_exit
+f: exiting
+r: do_exit
+r: exiting
 end

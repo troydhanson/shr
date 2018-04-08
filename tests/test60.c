@@ -7,9 +7,10 @@
 #include <unistd.h>
 #include "shr.h"
 
-char *ring = __FILE__ ".ring";
+char *ring = "/dev/shm/" __FILE__ ".ring";
 
 int main() {
+  setlinebuf(stdout);
   int rc = 0,fd;
   shr *s;
   ssize_t nr;
@@ -18,7 +19,7 @@ int main() {
   setbuf(stdout,NULL);
   unlink(ring);
 
-  shr_init(ring, 10, 0);
+  shr_init(ring, 14, 0);
   s = shr_open(ring, SHR_WRONLY);
   if (s == NULL) goto done;
   nr = shr_write(s, "abc", 3);
@@ -45,6 +46,7 @@ int main() {
   do {
     printf("read\n");
     nr = shr_read(s, &c, sizeof(c)); // byte read
+    if (nr < 0) printf("r: [%zd] (buf too small)\n", nr);
     if (nr > 0) printf("r: [%c]\n", c);
     if (nr == 0) printf("r: wouldblock\n");
 

@@ -6,7 +6,7 @@ w: write
 w: write
 w: write
 r: readv
-r: rc -3
+r: rc -2
 r: niov 0
 w: close
 r: close

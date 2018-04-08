@@ -1,15 +1,89 @@
-r: ready
-w: ready
-w: open
-r: open
-w: write
-w: write
-w: write
-r: readv
-r: rc -1
-r: niov 0
-w: close
-r: close
-w: eof
-r: eof
+w: do_open
+r: do_open
+w: do_write_one_5b
+w: wrote seq aaaaa
+w: do_write_one_3b
+w: wrote seq bbb
+w: do_write_one
+w: wrote seq c
+w: do_write_one_3b
+w: wrote seq ddd
+w: do_write_one
+w: wrote seq e
+w: do_write_one_5b
+w: wrote seq fffff
+w: do_write_one
+w: wrote seq g
+w: do_write_one
+w: wrote seq h
+r: do_stat
+stat: 0
+bw 20, br 0, mw 8, mr 0, md 6, bd 18, bn 20, bu 2, mu 2
+r: do_read_one
+g
+w: do_write_one_5b
+w: wrote seq iiiii
+r: do_read_one
+h
+r: do_read_one
+iiiii
+f: do_open
+f: do_stat
+stat: 0
+bw 25, br 7, mw 9, mr 3, md 7, bd 19, bn 20, bu 6, mu 2
+f: do_read_one
+h
+f: do_read_one
+iiiii
+w: do_write_one_5b
+w: wrote seq jjjjj
+r: do_read_one
+jjjjj
+f: do_read_one
+jjjjj
+w: do_write_one_3b
+w: wrote seq kkk
+r: do_read_one
+kkk
+f: do_read_one
+kkk
+w: do_write_one_2b
+w: wrote seq ll
+w: do_write_one
+w: wrote seq m
+r: do_read_one
+ll
+f: do_read_one
+ll
+r: do_read_one
+m
+f: do_read_one
+m
+f: do_close
+f: do_open
+f: do_read_one
+ll
+r: do_read_one
+shr_read: no data
+w: do_write_one_2b
+w: wrote seq nn
+f: do_read_one
+m
+r: do_read_one
+nn
+f: do_read_one
+nn
+r: do_read_one
+shr_read: no data
+f: do_read_one
+shr_read: no data
+w: do_close
+f: do_close
+r: do_close
+w: do_exit
+w: exiting
+f: do_exit
+f: exiting
+r: do_exit
+r: exiting
 end

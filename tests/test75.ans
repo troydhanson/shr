@@ -1,0 +1,55 @@
+w: do_open
+r: do_open
+w: do_fill
+w: wrote 10 messages (to seq 10)
+w: do_write_one
+w: wrote 1 message (to seq 11)
+w: do_write_one
+w: wrote 1 message (to seq 12)
+w: do_write_one
+w: wrote 1 message (to seq 13)
+w: do_write_one
+w: wrote 1 message (to seq 14)
+f: do_open
+f: do_read_one
+4
+r: do_read_one
+4
+f: do_farm_stat
+drops: 0
+r: do_farm_stat
+drops: 4
+f: do_read_half
+5
+6
+7
+8
+9
+r: do_read_half
+5
+6
+7
+8
+9
+f: do_read_half
+10
+11
+12
+13
+shr_read: 0
+r: do_read_half
+10
+11
+12
+13
+shr_read: 0
+w: do_close
+f: do_close
+r: do_close
+w: do_exit
+w: exiting
+f: do_exit
+f: exiting
+r: do_exit
+r: exiting
+end

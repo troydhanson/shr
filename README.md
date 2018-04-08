@@ -1,58 +1,102 @@
+Back to the [shr Github page](http://github.com/troydhanson/shr).
+Back to [my other projects](http://troydhanson.github.io/).
+
 # `shr`: a multi-process ring buffer in C
 
-Originally part of [fluxcap](https://github.com/troydhanson/fluxcap), the shr
-library is now in its own repository since it is a generic buffering mechanism.
+The `shr` library is written in C for Linux only. It is MIT licensed.
 
-This is a ring buffer in C for Linux.  The elements of the ring can be bytes or
-messages- an arbitrary binary buffer with a length.  In message mode, each read
-or write is a full message, with its boundaries preserved (no partial messages).
+This is a ring buffer in C for Linux.  The elements of the ring are messages.
+A message is an arbitrary binary buffer with a length (given as a `size_t`, 
+usually an 8-byte quantity). Each read or write is a full message, with its
+boundary preserved. A write never accepts part of a message, nor does a read
+ever return part of a message. It supports batched I/O (`shr_writev` and
+`shr_readv`), or one by one (`shr_write` and `shr_read`).
 
-It is designed for use by two or more communicating processes. The processes
+This ring buffer is designed for use by two or more processes. The processes
 can be concurrent, or they can run at separate times.  In other words, the ring
 persists independently of the processes that use it. When concurrent processes
-pass data through the ring, the data sharing occurs in memory.
+pass data through the ring, the data sharing occurs in memory. The ring is a
+file that's mapped into memory when processes open it.  A POSIX file lock
+protects the ring so that only one process can read or write it at any moment.
 
-When the ring is full, the arrival of new data overwrites old data in the ring
-if that data has been read (or, even if it has not been read, in `SHR_DROP`
-mode; otherwise, a write blocks until sufficient old data has been read).
+When the ring is full, newly-arriving data overwrites old, already-read data.
+This may cause a blocking writer to wait for space to become available.
+Space is made available as readers read data, making it eligible for overwrite.
+However, if the ring was created in `SHR_DROP` mode, writes proceed regardless;
+the ring discards old data, read or unread, to make room for new.
 
-In non-blocking mode, reads returns immediately if no data is available; and
-writes return immediately if inadequate space exists in the ring. (The write 
-would succeed in `SHR_DROP` mode by reclaiming space from unread data).
-Otherwise the a non-blocking read or write returns 0 immediately if it would
-normally have to block.
+A writer and reader can also be opened in non-blocking mode.
 
-The ring itself is a memory-mapped file. Usually, it is placed in a `tmpfs`
-filesystem like `/dev/shm` so it resides in RAM without a disk backing.  Since
-the ring is a file, it has file persistence. A POSIX file lock protects the
-ring so that only one process can put data in, or read data from it, at any
-moment.
+* a non-blocking read returns 0 immediately if no new data is available.
+* a non-blocking write returns 0 immediately if it requires more than the 
+  available space (except in `SHR_DROP` mode, where the write proceeds by
+  dropping unread data)
 
-When one or more processes have the ring open, they map it into their memory.
-So a reader and writer pass data through shared memory. The operating system
-does lazy background flushing of the memory pages to the backing store, which
-is why placing it in a `tmpfs` is preferable, unless you want disk persistence.
+A reader can use select/poll/epoll to monitor availability of data in the ring.
+To do so, it calls `shr_get_selectable_fd` to get a file descriptor to poll.
+The descriptor becomes readable if data is available in the ring. When it is,
+the reader calls `shr_read` or `shr_readv` to read it. To get the selectable
+descriptor, the reader must be opened in non-blocking mode.
 
-A reader can select or poll on data availability in the ring. The reader calls
-`shr_get_selectable_fd` to get a file descriptor on which to poll. Internally,
-it is tied to a fifo. The fifo is readable if there is data available, and is
-not readable when the ring data is fully consumed. (The data itself does not
-pass through the fifo. It is just to indicate I/O readiness in the ring).
+Multiple readers and writers can operate on one ring. It's limited to 64 of 
+each (`BW_WAITMAX`). All contend for the ring lock so concurrency is limited.
+Readers normally consume the data they read; multiple readers therefore read
+distinct messages from the ring.  The opposite behavior is set using the
+`SHR_FARM` ring creation flag; this means a farm of independent readers all
+see each message. `SHR_FARM` also sets `SHR_DROP` on the ring; see `shr_init`.
 
-Typically a ring is used with one reader and one writer. While having multiple
-readers and multiple writers is ok, it's limited to `MAX_RWPROC` (16) of each.
-All contend for the same lock so concurrency is limited.  Lastly, readers each
-consume the data they read; the next read (in any reader) gets the next data.
+Each process that opens a ring maps it into memory.  Data flow occurs via these
+pages of shared memory. As described in "The Linux Programming Interface," by
+Michael Kerrisk, p.1027:
 
-The source is in `shr.h` and `shr.c`.
+> Since all processes with a shared mapping of the same file region share the
+> same physical pages of memory, [this] is a method of (fast) IPC.
 
-Compatibility: `shr` is written in C for Linux only. Whether it runs on other
-POSIX platforms depends on whether they support opening a fifo in read/write
-mode- see `fifo(7)`. 
+Yet, because the ring is a file, it must be created on a filesystem. Place the
+ring file in a RAM filesystem unless persistence is needed.  Then, the periodic
+flush of the memory pages to their backing store becomes a no-op.  It is vastly
+preferable to place the ring in a RAM filesystem for this reason. But if disk
+persistence is needed, the ring can be created in a regular filesystem.
 
-Performance: no claims are made. On a laptop, rates on the order of a million
-reads and writes per second seemed typical. Once a reader or writer has the
-lock, it can transfer data at the memory bandwidth since I/O is `memcpy`.
+Three RAM filesystems suitable for use with shr are tmpfs, ramfs and hugetlbfs.
+You can use `shr-tool` to mount these or do it using the `mount` command.
+however shr-tool will protect against accidentally stacking a RAM filesystem on
+top of another one, and can make subdirectories inside the new mount for you.
+
+Very briefly, 
+
+ * ramfs is a RAM filesystem that consumes pages of physical memory
+   without enforcing size limits.  It is unswappable. It is well behaved
+   with shr, because shr rings have their full size allocated at creation.
+
+ * Tmpfs is basically ramfs with the addition of swappability and size limits.
+   It provides no particular benefit for over ramfs, shr. The swappability 
+   is usually undesirable, therefore, it is recommended to create the ring using
+   `SHR_MLOCK` so it remains locked into memory when any process uses it. 
+    This also solves an issue where tmpfs when over 50% full seem to degrade.
+
+ * hugetlbfs is an unswappable RAM filesystem using huge pages (2MB or larger).
+   It gives the best performance, because TLB cache is used more effectively.
+   However huge pages are a limited in quantity.  When `shr-tool` is used to
+   mount a hugetlbfs, it has an option to try to raise the system huge page
+   reservation.  Ulrich Drepper writes in https://lwn.net/Articles/253361/
+
+> Still, huge pages are the way to go in situations where performance is a premium,
+> resources are plenty, and cumbersome setup is not a big deterrent.
+
+## Build & Install
+
+You should have gcc, autoconf, automake, and libtool installed first.
+
+    cd shr
+    ./autogen.sh
+    ./configure
+    make
+    sudo make install
+    sudo ldconfig
+
+Afterward, libshr.so can be found in `/usr/local/lib`, the shr.h header in
+`/usr/local/include` and shr-tool in `/usr/local/bin`.
 
 ## API
 
@@ -66,30 +110,56 @@ The ring should be created once, ahead of time. Do not call `shr_init` in each
 process that uses the ring. Typically a setup program creates the ring before
 any of the programs that need it. (You can also create the ring on the command
 line using the `shr-tool` executable from the `util/` directory; run it with
-`-h` to view its usage).
+`-h` to view its usage).  The ring file is created a bit larger than the size
+given, for the bookkeeping areas.
 
 A bitwise OR made from the following flags can be passed as the third argument:
 
-    SHR_OVERWRITE
     SHR_KEEPEXIST
-    SHR_MESSAGES
     SHR_DROP
+    SHR_FARM
+    SHR_SYNC
+    SHR_APPDATA_1
+    SHR_MAXMSGS_2
+    SHR_MLOCK
 
-The first two mode flags control what happens if the ring file already exists.
-`SHR_OVERWRITE` is destructive mode; it removes then recreates the file empty.
-`SHR_KEEPEXIST` preserves the ring as-is. (It is even safe on a ring that is
-open and in-use).  If neither flag is specified, `shr_init` returns an error
-(a negative number) if the ring already exists. 
-
-Message mode is enacted by setting `SHR_MESSAGES`. In this mode, read and
-write operate on one message at a time. Otherwise, the ring elements are bytes.
+The first mode flag controls what happens if the ring file already exists.
+By default is gets overwritten; `SHR_KEEPEXIST` instead keeps the ring file
+as-is. This flag is safe even if the ring might be open by another process.
 
 In `SHR_DROP` mode, a write to a full ring automatically overwrites old ring
-data *even if it is unread*. (Unread data is normally retained until it's read,
-by blocking a writer if need be).
+data *even if it is unread*. In the absence of this flag, such a write blocks.
 
-The file is actually created a tiny bit larger than the size given, for the
-bookkeeping region at the front of the file.
+With `SHR_FARM`, the ring is considered input to a farm of independent readers.
+In the absence of this flag, readers consume the messages they read meaning
+that each reader sees distinct messages. In `SHR_FARM` all readers see the 
+same messages.  Each reader starts at the oldest message in the ring.  If a
+reader exits and restarts, it starts reading back at the beginning again.
+`SHR_FARM` automatically sets `SHR_DROP`. This means that writes on the ring
+always succeed, even if data unread by some readers has to be overwritten.
+A farm reader can use `shr_farm_stat` to see how many messages it has lost
+since opening the ring.
+
+When `SHR_APPDATA_1` is set, the caller should pass a `char*` and `size_t` as
+trailing arguments to `shr_init`, specifying a buffer and its length to copy
+into the ring buffer's "application data" area. This is opaque data stored
+separately from the ring data, as a convenience to the caller. It may contain
+any data. For example, the caller could store meta-data about the ring in it.
+The caller can read it back or rewrite it later using `shr_appdata()`.
+
+If `SHR_MAXMSGS_2` is set in the flags, the caller should add a `size_t`
+argument specifying the maximum number of messages the ring should hold.
+This forms a secondary limit (the first being the byte capacity of the ring)
+on the ring content. If left unspecified it defaults to the ring byte size
+divided by 100. The `_2` in the flag name indicates the order its arguments
+should appear- in this case, after `SHR_APPDATA_1` arguments if present.
+
+Use `SHR_SYNC` to induce an `msync` after each ring I/O operation. It is 
+only intended for greater robustness in the event of power failure on a
+disk-backed shr ring. On a RAM-backed ring, it has no benefit.
+
+Use `SHR_MLOCK` to cause processes that open the ring to lock it into memory.
+This makes it unswappable, for as long as any process has it open.
 
 ### Open
 
@@ -102,6 +172,7 @@ This returns an opaque ring handle. The flags is 0 or a bitwise combination of:
     SHR_RDONLY
     SHR_WRONLY
     SHR_NONBLOCK
+    SHR_BUFFERED
 
 A reader uses `SHR_RDONLY` and a writer uses `SHR_WRONLY`. These are mutually
 exclusive.
@@ -110,64 +181,102 @@ The `SHR_NONBLOCK` mode causes subsequent `shr_read` or `shr_write` operations
 to return immediately rather than block if they would need to wait for data or
 space.
 
+The `SHR_BUFFERED` flag is designed for use with writers only. If this flag
+is set, writes will be buffered internally until the internal buffer fills or
+until `shr_flush()` is called. It is designed to reduce acquisition of the 
+lock, so that batched output is performed.  (The buffer is normally 10% of the
+ring size or 10,000 messages; these values are clamped and may change).
+
+The shr handle is not designed for use across a fork.
+
 ### Write data
 
-A process (that has the ring open for writing) can put data in this way:
+A process that has opened the ring for writing can put data in this way:
 
     ssize_t shr_write(shr *s, char *buf, size_t len);
 
-If the ring was initialized in message mode, then the buffer and length are considered
-to comprise a single message, whose boundaries should be preserved when eventually read.
-In contrast, in the default (byte) mode, the data is considered a byte stream.
+The buffer and length are considered to comprise a single message, whose
+boundaries should be preserved when read later.
 
-Return value:
+There is also `shr_writev`, an `iovec`-based bulk write function.
 
-     > 0 (number of bytes copied into ring, always the full buffer)
-     0   (insufficient space in ring, in non-blocking mode)
-    -1   (error, such as the buffer exceeds the total ring capacity)
-    -2   (signal arrived while blocked waiting for ring)
+    ssize_t shr_writev(shr *s, struct iovec *iov, size_t iovcnt);
 
-Also see `shr_writev` in `shr.c` for the `iovec`-based write function.
+If there is sufficient space in the ring, it copies all the messages
+(one per struct iovec) into the ring; otherwise it waits for space,
+or returns 0 immediately in non-blocking mode. (Or, it drops unread
+data from the ring, if the ring was created in `SHR_DROP` mode). It
+is "all or nothing"- it writes all the messages, or none of them.
 
+See shr.c for return values.
 
 ### Read data
 
-To read data from the ring, a process that has opened the ring for reading, can do:
+A process that has opened the ring for reading can read a message this way:
 
     ssize_t shr_read(shr *s, char *buf, size_t len);
 
-Return value:
+There is also `shr_readv`, an `iovec`-based bulk read function.
 
-     > 0 (number of bytes read from the ring)
-     0   (ring empty, in non-blocking mode)
-    -1   (error)
-    -2   (signal arrived while blocked waiting for ring)
-    -3   (buffer can't hold message; SHR_MESSAGES mode)
+    ssize_t shr_readv(shr *s, char *buf, size_t len, struct iovec *iov, 
+      size_t *iovcnt);
 
-Also see `shr_readv` in `shr.c` for the `iovec`-based read function.
+This function uses buf to hold message data, and populates the struct iovec
+array so each one points to one message.  The caller provides the uninitialized
+array of struct iovec, and this function fills them in. The iovcnt is an IN/OUT
+parameter: on input it's the number of struct iov provided, and on output it's
+how many this function filled in.
+ 
+See shr.c for return values.
 
 ### Select/poll for data
 
-A reader that has opened the ring in `SHR_RDONLY | SHR_NONBLOCK` mode can call
+A process that has opened the ring for reading in non-blocking mode can use:
 
     int shr_get_selectable_fd(shr *s);
 
-to get a file descriptor compatible with select or poll.  If the descriptor
-becomes readable, the reader should call `shr_read`.  (It is not necessary
-to read from the descriptor itself; this is taken care of internally).
-Afterward, the descriptor is made readable again if unread data remains in
-the ring.  It is OK to read only some of the available data, and rely on the
-poll to re-trigger.
+to get a file descriptor compatible with select or poll.  The caller can
+monitor the descriptor for readability in its own event loop. Whenever the
+descriptor becomes readable, the reader should call `shr_read` or `shr_readv`.
+The caller should not read on the selectable descriptor itself. After `shr_read`
+the descriptor is made readable again if unread data remains in the ring, or
+cleared if the ring data has all been read. It is okay for the caller to read
+only some of the available messages; the descriptor then remains ready as long
+as unread data remains.
 
-When the descriptor becomes readable, it is possible to have the subsequent
-`shr_read` return zero indicating no data was available. (For example if one
-process writes a byte to the ring, while two processes await data, both readers
-wake up but only one gets the byte. The other reader gets a zero return from
-`shr_read`). Therefore, to use `shr_get_selectable_fd` the reader needs to be
-in `SHR_NONBLOCK` mode (so it gets a zero return instead of blocking in this
-case).
+When the descriptor becomes readable, the next `shr_read` or `shr_readv` may
+return zero indicating no data was available. This is a spurious wakeup. The
+shr library allows for the possibility of these. For example, if one process
+writes a message to the ring while two processes wait, both readers wake up-
+but only one may consume the message. The other reader gets a zero return.
+To handle spurious wakeups, a reader needs to be open in `SHR_NONBLOCK` mode.
+This prevents blocking in `shr_read` after a spurious wakeup.
 
 This function returns -1 on error.
+
+### Signals while waiting
+
+If an application is blocked waiting for ring data, or blocked waiting for
+free space to write data into the ring, and a signal occurs, what happens?
+
+If an application leaves default signal handlers and mask in place, it may
+simply terminate if a signal occurs while blocked in `shr_read`/`shr_write`.
+For example, SIGHUP's default handler terminates the process.  Or, the signal
+may be ignored. Or, if the application installed a handler, the internal read
+may return an error (EINTR), or it may be restarted if `SA_RESTART` was used.
+
+These complications can be avoided by using signalfd and sigprocmask.
+First, the application uses sigprocmask to block all signals. Then it creates
+a signalfd to be notified about signals of interest. The signalfd's descriptor
+can be given to `shr_ctl`:
+
+    int shr_ctl(shr *s, SHR_POLLFD, fd);
+
+to cause `shr_write` or `shr_read`, and their writev and readv versions, to
+return -3 if the signalfd becomes readable inside a blocking `shr_read`/write.
+
+In this case, the application can read the signalfd as usual to get the signal
+at an opportune time in its event loop.
 
 ### Close
 
@@ -182,8 +291,9 @@ can be obtained using this function. See the definition of `shr_stat` in `shr.h`
 
     int shr_stat(shr *s, struct shr_stat *stat, struct timeval *reset);
 
-This function can, optionally, reset the stats and start a new period, by
-passing a non-NULL pointer in the final argument.
+This function can, optionally, reset the counters and start a new metrics
+period, by passing a non-NULL pointer in the final argument.
 
 You can also view the metrics on the command line using `shr-tool` from the `util/` 
 directory.
+

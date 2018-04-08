@@ -4,9 +4,7 @@
 #endif
 #include <sys/types.h>
 #include <sys/socket.h>
-#include <sys/syscall.h>
 #include <sys/mman.h>
-#include <signal.h>
 #include <sys/stat.h>
 #include <sys/file.h>
 #include <unistd.h>
@@ -14,60 +12,74 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <assert.h>
-#include <dirent.h>
 #include <string.h>
 #include <errno.h>
 #include <stdio.h>
-#include <libgen.h>
 #include "shr.h"
+#include "bw.h"
 
 #define CREAT_MODE 0644
 #define MIN_RING_SZ (sizeof(shr_ctrl) + 1)
-#define MAX_RWPROC 16
-#define MAX_FIFO_NAME 32
 #define MIN(a,b) (((a) < (b)) ? (a) : (b))
 
+struct msg {
+  size_t pos;
+  size_t len;
+};
 
 /* shr_ctrl is the control region of the shared/multiprocess ring.
  * this struct is mapped to the beginning of the mmap'd ring file.
  * the volatile offsets constantly change, under posix file lock,
  * as other processes copy data in or out of the ring. 
- * volatile because these updates happen in our shared memory. 
  */
-#define R2W 0
-#define W2R 1
-static char magic[] = "libshr1";
+static char magic[] = "libshr4";
 typedef struct {
   char magic[sizeof(magic)];
-  int version;
-  int io_seq;       /* advances whenever fifos join or leave ring */
-  char fifos[2][MAX_RWPROC][MAX_FIFO_NAME]; /* [0] = R2W, [1]=W2R */
-  pid_t pids[2][MAX_RWPROC];                /* pids owning fifos */
   unsigned volatile gflags;
   size_t volatile n;        /* allocd size */
-  size_t volatile i;        /* input pos (next write starts here)   */
-  size_t volatile u;        /* unread (current num bytes unread)    */
-  size_t volatile o;        /* output pos (next read starts here)   */
-  size_t volatile m;        /* unread msg count (SHR_MESSAGES mode) */
-  struct shr_stat stat;     /* i/o stats       */
-  size_t app_data_len;      /* len of app region after d - opaque */
+  size_t volatile i;        /* offset from r->d for next write      */
+  size_t volatile u;        /* current number of unread bytes       */
+  size_t volatile m;        /* current number of unread messages    */
+  size_t volatile mp;       /* msgs present in ring, unread + read  */
+  size_t volatile r;        /* slot number in mv for next read      */
+  size_t volatile e;        /* slot number in mv of eldest message  */
+  size_t volatile q;        /* sequence number of eldest message    */
+  struct shr_stat stat;     /* i/o stats                            */
+  size_t mm;                /* max number of messages (mv slots)    */
+  size_t mv_len;            /* message vector len, located after d  */
+  size_t pad_len;           /* padding after data to align mv       */
+  size_t app_len;           /* len of app region after mv - opaque  */
+  bw_handle w2r;            /* implements reader blocking           */
+  bw_handle r2w;            /* implements writer blocking           */
   char d[];                 /* ring data; C99 flexible array member */
 } shr_ctrl;
 
-/* the handle is given to each shr_open caller. it is opaque to the caller */
+struct cache {
+  char *buf;                /* cache space */
+  size_t sz;                /* size of buf */
+  size_t n;                 /* bytes used */
+  struct iovec *iov;        /* cache iov */
+  size_t vt;                /* iov total */
+  size_t vm;                /* iov used */
+};
+
+/* handle returned from shr_open,
+ * opaque to the caller  */
 struct shr {
-  int ring_fd;
-  int tmp_fd;
-  int bell_fd;
-  int io_seq;               /* advances whenever fifos join or leave ring */
-  int rwfd[MAX_RWPROC];     /* fd's to peer fifos */
-  char fifo[MAX_FIFO_NAME]; /* our own fifo to block and receive wakeups on */
-  struct stat s;
-  unsigned flags;
-  int index;                 /* index in s->r->pids,fifos (etc) we occupy */
+  int ring_fd;    /* descriptor of mapped ring file   */
+  int wait_fd;    /* descriptor to block on if needed */
+  struct stat s;  /* stat of mapped ring file         */
+  unsigned flags; /* flags reflecting shr_open mode   */
+  size_t q;       /* next unread msg seqno (farm mode)*/
+  size_t md;      /* msgs dropped by this farm-reader */
+  bw_t *w2r;      /* block/wake line writer-to-reader */
+  bw_t *r2w;      /* block/wake line reader-to-writer */
+  struct cache c; /* when ring is opened SHR_BUFFERED */
+  size_t n;       /* copy of r->n to utilize w/o lock */
+  size_t mm;      /* copy of r->mm to utilize w/o lock */
   union {
-    char *buf;   /* mmap'd area */
-    shr_ctrl * r;
+    char *buf;    /* ring file mmap'd location        */
+    shr_ctrl * r; /* ring file control region         */
   };
 };
 
@@ -77,10 +89,6 @@ struct shr {
  * we use a blocking wait (F_SETLKW) for the lock. this should be obtainable in
  * quasi bounded time because a peer (reader or writer using this same library)
  * should also only lock/manipulate/release in rapid succession.
- *
- * if a signal comes in while we await the lock, fcntl can return EINTR. since
- * we are a library, we do not alter the application's signal handling.
- * rather, we propagate the condition up to the application to deal with. 
  *
  * also note, since this is a POSIX file lock, anything that closes the 
  * descriptor (such as killing the application holding the lock) releases it.
@@ -94,13 +102,21 @@ struct shr {
  *
  * lastly, on Linux you can see the active locks in /proc/locks
  *
+ * returns
+ *  0 on success
+ * -1 on error
  */
 static int lock(int fd) {
-  int rc = -1;
-  const struct flock f = { .l_type = F_WRLCK, .l_whence = SEEK_SET, };
+  int rc = -1, sc;
 
-  if (fcntl(fd, F_SETLKW, &f) < 0) {
-    fprintf(stderr, "fcntl (lock acquisiton failed): %s\n", strerror(errno));
+  const struct flock f = {
+    .l_type = F_WRLCK,
+    .l_whence = SEEK_SET
+  };
+
+  sc = fcntl(fd, F_SETLKW, &f);
+  if (sc < 0) {
+    shr_log("fcntl lock: %s\n", strerror(errno));
     goto done;
   }
 
@@ -111,11 +127,16 @@ static int lock(int fd) {
 }
 
 static int unlock(int fd) {
-  int rc = -1;
-  const struct flock f = { .l_type = F_UNLCK, .l_whence = SEEK_SET, };
+  int rc = -1, sc;
 
-  if (fcntl(fd, F_SETLK, &f) < 0) {
-    fprintf(stderr, "fcntl (lock release failed): %s\n", strerror(errno));
+  const struct flock f = {
+    .l_type = F_UNLCK,
+    .l_whence = SEEK_SET
+  };
+
+  sc = fcntl(fd, F_SETLK, &f);
+  if (sc < 0) {
+    shr_log("fcntl unlock: %s\n", strerror(errno));
     goto done;
   }
 
@@ -126,110 +147,154 @@ static int unlock(int fd) {
 }
 
 /*
- * shr_init creates a ring file
+ * shr_sync
  *
- * succeeds only if the file is created new.  Attempts to resize an existing
- * file or init an existing file, even of the same size, fail.
+ * sync the mapped ring buffer to backing store.
  *
- * flags:
- *    SHR_OVERWRITE - permits ring to exist already, overwrites it
- *    SHR_KEEPEXIST - permits ring to exist already, leaves size/content
- *    SHR_MESSAGES  - ring i/o occurs in messages instead of byte stream
- *    SHR_DROP      - overwrite old ring data as ring fills, even if unread
- *    SHR_APPDATA   - store supplemental "app data" in ring (buf,len args)
+ * called with ring under lock
  *
- * returns 0 on success
- *        -1 on error
- *        -2 on already-exists error (keepexist/overwrite not requested)
- * 
+ * this should never be necessary, strictly speaking.
+ * furthermore, it should be a no-op on a tmpfs,
+ * which is the normal backing for a shr ring.
  *
+ * The Linux Programming Interface by Michael Kerrisk
+ * (TLPI) states on p. 1032:
+ *
+ *   Linux provides a so-called unified virtual
+ *   memory system. This means that, where possible,
+ *   memory mappings and blocks of the buffer cache
+ *   share the same pages of physical memory. Thus,
+ *   the views of a file obtained via a mapping and
+ *   via I/O system calls (read(), write(), and so
+ *   on) are always consistent, and the only use of
+ *   msync() is to force the contents of a mapped
+ *   region to be flushed to disk.
  *
  */
-int shr_init(char *file, size_t sz, unsigned flags, ...) {
-  int rc = -1, fd = -1;
-  char *buf = NULL;
-  char *app_data = NULL;
-  size_t app_sz = 0;
+static int shr_sync(shr *s) {
+  shr_ctrl *r = s->r;
+  int rc;
+
+  rc = (r->gflags & SHR_SYNC) ?
+       msync(s->buf, s->s.st_size, MS_SYNC) : 0;
+
+  if (rc < 0)
+    shr_log("msync: %s\n", strerror(errno));
+
+  return rc;
+}
+
+/*
+ * shr_init creates a ring file
+ *
+ * flags:
+ *    SHR_FARM         - farm of parallel readers; SHR_DROP implied
+ *    SHR_DROP         - ring overwrites unread messages when full
+ *    SHR_APPDATA_1    - store caller buffer in ring (buf,len args)
+ *    SHR_MAXMSGS_2    - ring holds given number of msgs (size_t arg)
+ *    SHR_KEEPEXIST    - if ring exists already, leave as-is
+ *
+ * returns 
+ *   0 on success
+ *  -1 on error
+ *
+ */
+int shr_init(char *file, size_t data_sz, unsigned flags, ...) {
+  size_t appsize=0, sz=0, mv_bytes, max_msgs=0, pad, m;
+  int rc = -1, fd = -1, exists, sc;
+  char *appdata=NULL, *buf=NULL;
 
   va_list ap;
   va_start(ap, flags);
 
-  size_t file_sz = sizeof(shr_ctrl) + sz;
-
-  if ((flags >= SHR_OPEN_FENCE) || (sz == 0) || 
-     ((flags & SHR_OVERWRITE) && (flags & SHR_KEEPEXIST))) {
-    fprintf(stderr,"shr_init: invalid parameters\n");
+  if ((flags >= SHR_OPEN_FENCE) || (data_sz == 0)) {
+    shr_log("shr_init: invalid flags\n");
     goto done;
   }
 
-  /* app data is stored opaquely after the ring */
-  if (flags & SHR_APPDATA) {
-    app_data = va_arg(ap, char *);
-    app_sz   = va_arg(ap, size_t);
-    file_sz += app_sz;
+  if (flags & SHR_APPDATA_1) {
+    appdata = va_arg(ap, char*);
+    appsize = va_arg(ap, size_t);
   }
 
-  /* if ring exists already, flags determine behavior */
-  struct stat st;
-  if (stat(file, &st) == 0) { /* exists */
-    if (flags & SHR_OVERWRITE) {
-      if (unlink(file) < 0) {
-        fprintf(stderr, "unlink %s: %s\n", file, strerror(errno));
-        goto done;
-      }
-    } else if (flags & SHR_KEEPEXIST) {
-      rc = 0;
-      goto done;
-    } else {
-      fprintf(stderr,"shr_init: %s already exists\n", file);
-      rc = -2;
-      goto done;
-    }
+  /* either the ring's data_sz or the max messages (mm)
+   * become the limiting factor in how much data the ring
+   * can store. only the data_sz is a required parameter.
+   * guestimate a max number of messages unless told. */
+  if (flags & SHR_MAXMSGS_2)
+    max_msgs = va_arg(ap, size_t);
+  if (max_msgs == 0)
+    max_msgs = (100 + data_sz / 100);
+  mv_bytes = max_msgs * sizeof(struct msg);
+
+  exists = (access(file, F_OK) == 0) ? 1 : 0;
+  if (exists && (flags & SHR_KEEPEXIST)) {
+    rc = 0;
+    goto done;
+  } 
+  
+  sc = exists ? unlink(file) : 0;
+  if (sc < 0) {
+    shr_log("unlink %s: %s\n", file, strerror(errno));
+    goto done;
   }
 
   fd = open(file, O_RDWR|O_CREAT|O_EXCL, CREAT_MODE);
-  if (fd == -1) {
-    fprintf(stderr,"open %s: %s\n", file, strerror(errno));
+  if (fd < 0) {
+    shr_log("open %s: %s\n", file, strerror(errno));
     goto done;
   }
 
-  if (lock(fd) < 0) goto done; /* close() below releases lock */
+  /* calculate padding after data to align mv */
+  m = data_sz % sizeof(void*);
+  pad = m ? (sizeof(void*) - m) : 0;
+  assert(pad < sizeof(void*));
+  sz = sizeof(shr_ctrl) + data_sz + pad;
+  assert((sz % sizeof(void*)) == 0);
 
-  if (ftruncate(fd, file_sz) < 0) {
-    fprintf(stderr,"ftruncate %s: %s\n", file, strerror(errno));
+  if (lock(fd) < 0) /* close() below releases lock */
+    goto done;
+
+  /* set the ring file size. ftruncate is unimplemented
+   * on hugetlbfs, so we permit EINVAL; on that fs, the
+   * mmap itself suffices to set ring's length in pages */
+  sz = sizeof(shr_ctrl) + data_sz + pad + mv_bytes + appsize;
+  sc = ftruncate(fd, sz);
+  if ((sc < 0) && (errno != EINVAL)) {
+    shr_log("ftruncate %s: %s\n", file, strerror(errno));
     goto done;
   }
 
-  buf = mmap(0, file_sz, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+  buf = mmap(0, sz, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
   if (buf == MAP_FAILED) {
-    fprintf(stderr, "mmap %s: %s\n", file, strerror(errno));
+    shr_log("mmap %s: %s\n", file, strerror(errno));
+    buf = NULL;
     goto done;
   }
 
   shr_ctrl *r = (shr_ctrl *)buf; 
   memset(r, 0, sizeof(*r));
   memcpy(r->magic, magic, sizeof(magic));
-  r->version = 1;
-  r->u = 0;
-  r->i = 0;
-  r->o = 0;
-  r->m = 0;
-  r->n = sz;
-
+  r->mm = max_msgs;
+  r->pad_len = pad;
+  r->mv_len = mv_bytes;
+  r->app_len = appsize;
+  r->n = data_sz;
   r->gflags = 0;
-  if (flags & SHR_MESSAGES) r->gflags |= SHR_MESSAGES;
-  if (flags & SHR_DROP) r->gflags |= SHR_DROP;
+  if (flags & SHR_SYNC)      r->gflags |=  SHR_SYNC;
+  if (flags & SHR_DROP)      r->gflags |=  SHR_DROP;
+  if (flags & SHR_FARM)      r->gflags |= (SHR_FARM | SHR_DROP);
+  if (flags & SHR_MLOCK)     r->gflags |=  SHR_MLOCK;
   if (flags & SHR_APPDATA) {
-    if (app_sz) memcpy(r->d + r->n, app_data, app_sz);
-    r->app_data_len = app_sz;
+    memcpy(r->d + r->n + r->pad_len + r->mv_len, appdata, appsize);
   }
 
   rc = 0;
 
  done:
-  if ((rc == -1) && (fd != -1)) unlink(file);
+  if (rc && (fd != -1)) unlink(file);
   if (fd != -1) close(fd);
-  if (buf && (buf != MAP_FAILED)) munmap(buf, file_sz);
+  if (buf) munmap(buf, sz);
   va_end(ap);
   return rc;
 }
@@ -240,25 +305,41 @@ int shr_init(char *file, size_t sz, unsigned flags, ...) {
  *
  * retrieve statistics about the ring. if reset is non-NULL, the 
  * struct timeval it points to is written into the internal stats
- * structure as the start time of the new stats period, and the 
- * counters are reset as a side effect
+ * structure, counters are zeroed, beginning a new stats period.
  *
- * returns 0 on success (and fills in *stat), -1 on failure
+ * returns 
+ *  0 on success (and fills in *stat)
+ * -1 on failure
  *
  */
 int shr_stat(shr *s, struct shr_stat *stat, struct timeval *reset) {
   int rc = -1;
 
   if (lock(s->ring_fd) < 0) goto done;
-  *stat = s->r->stat; /* struct copy */
-  stat->bn = s->r->n; /* see shr.h; these three come from ring state */
+
+  /* copy stats */
+  *stat = s->r->stat;
+
+  /* ring state */
+  stat->bn = s->r->n;
   stat->bu = s->r->u;
   stat->mu = s->r->m;
+  stat->mm = s->r->mm;
+
+  /* cache state */
+  stat->cn = s->c.sz;
+  stat->cm = s->c.vm;
+  stat->cb = s->c.n;
+
+  /* ring attributes */
+  stat->flags = s->r->gflags;
 
   if (reset) {
     memset(&s->r->stat, 0, sizeof(s->r->stat));
     s->r->stat.start = *reset; /* struct copy */
   }
+
+  if (shr_sync(s) < 0) goto done;
 
   rc = 0;
 
@@ -267,6 +348,41 @@ int shr_stat(shr *s, struct shr_stat *stat, struct timeval *reset) {
   return rc;
 }
 
+/*
+ * shr_farm_stat
+ *
+ * for a SHR_FARM mode ring, and an SHR_RDONLY reader,
+ * return how many messages this reader has missed
+ * (dropped by the ring before this reader read them).
+ * If reset is non-zero, it zeroes the drops counter.
+ *
+ * the drop counter is updated when shr_read/shr_readv
+ * is called.
+ */
+size_t shr_farm_stat(shr *s, int reset) {
+  size_t d;
+
+  assert(s->flags & SHR_RDONLY);
+
+  d = s->md;
+  if (reset) s->md = 0;
+
+  return d;
+}
+
+/*
+ * validate_ring
+ *
+ * check basic conditions for ring: magic, internal state.
+ *
+ * NOTE: the size of the ring is allowed to exceed the
+ * precisely expected byte size that the rings requires.
+ * this supports hugetlbfs-backed rings, whose size gets
+ * rounded up to a huge tlb page size.
+ *
+ * called with ring under lock
+ *
+ */
 static int validate_ring(struct shr *s) {
   int rc = -1;
   shr_ctrl *r = s->r;
@@ -275,100 +391,18 @@ static int validate_ring(struct shr *s) {
   if (s->s.st_size < (off_t)MIN_RING_SZ)       { rc = -2; goto done; }
   if (memcmp(s->r->magic,magic,sizeof(magic))) { rc = -3; goto done; }
 
-  exp_sz = sizeof(shr_ctrl) + r->n + r->app_data_len; /* expected sz */
-  sz = s->s.st_size;                                  /* actual sz */
+  exp_sz = sizeof(shr_ctrl) + r->n + r->pad_len + r->mv_len + r->app_len;
+  sz = s->s.st_size;
 
-  if (sz != exp_sz) {rc = -4; goto done; } /* size not expected */
+  if (sz <  exp_sz) {rc = -4; goto done; } /* undersize (see note) */
   if (r->u >  r->n) {rc = -5; goto done; } /* used > size */
   if (r->i >= r->n) {rc = -6; goto done; } /* input position >= size */
-  if (r->o >= r->n) {rc = -7; goto done; } /* output position >= size */
+  if (r->r >= r->mm){rc = -7; goto done; } /* output slot# >= #slots */
 
   rc = 0;
 
  done:
   return rc;
-}
-
-static int make_blocking(int fd) {
-  int fl, unused = 0, rc = -1;
-
-  fl = fcntl(fd, F_GETFL, unused);
-  if (fl < 0) {
-    fprintf(stderr, "fcntl: %s\n", strerror(errno));
-    goto done;
-  }
-
-  if ((fl & O_NONBLOCK) == 0) {
-    rc = 0;
-    goto done;
-  }
-
-  if (fcntl(fd, F_SETFL, fl & (~O_NONBLOCK)) < 0) {
-    fprintf(stderr, "fcntl: %s\n", strerror(errno));
-    goto done;
-  }
-
-  rc = 0;
-
- done:
-  return rc;
-}
-
-static int make_nonblock(int fd) {
-  int fl, unused = 0, rc = -1;
-
-  fl = fcntl(fd, F_GETFL, unused);
-  if (fl < 0) {
-    fprintf(stderr, "fcntl: %s\n", strerror(errno));
-    goto done;
-  }
-
-  if (fl & O_NONBLOCK) {
-    rc = 0;
-    goto done;
-  }
-
-  if (fcntl(fd, F_SETFL, fl | O_NONBLOCK) < 0) {
-    fprintf(stderr, "fcntl: %s\n", strerror(errno));
-    goto done;
-  }
-
-  rc = 0;
-
- done:
-  return rc;
-}
-
-/* a program that has the ring open for reading, can optionally get a file
- * descriptor (via shr_get_selectable_fd) that is compatible with select/poll,
- * to know when data can be read from the ring. the descriptor is the bell fifo.
- * 
- * after each shr_read we ensure the bell readiness is accurately updated. to
- * do so, we either drain the bell fifo to prevent poll triggering if no data
- * is left in the ring, or we put a byte into the fifo if data remains in the
- * ring, as peers do when they put data in.
- */
-static int refresh_bell(shr *s) {
-  char b = 0, discard[1024];
-  int nr;
-
-  if (make_nonblock(s->bell_fd) < 0) return -1;
-
-  if (s->r->u == 0) { /* no data in ring. drain fifo to prevent poll trigger */
-    do {
-      nr = read(s->bell_fd, &discard, sizeof(discard));
-    } while (nr > 0);
-
-  } else { /*  ring has unread data. put a byte in fifo so poll triggers */
-    nr = write(s->bell_fd, &b, sizeof(b));
-  }
-
-  if ((nr == -1) && !((errno == EAGAIN) || (errno==EWOULDBLOCK))) {
-    fprintf(stderr,"read/write: %s\n", strerror(errno));
-    return -1;
-  } 
-
-  return 0;
 }
 
 /*
@@ -377,257 +411,211 @@ static int refresh_bell(shr *s) {
  * returns a file descriptor that can be used with select/poll/epoll 
  *
  * succeeds only if the ring was opened with SHR_RDONLY|SHR_NONBLOCK
- * because spurious wakeups can occur (e.g. writer puts byte into 
- * ring while two readers await data; both wake up, but one gets it).
- * so the caller must be non-blocking to deal with spurious wakeups
+ * the caller must be non-blocking because spurious wakeups can occur 
+ * e.g. two writes + two wakeups -> one coalesced read + extra wakeup
+ * thus, an shr_read arising from a spurious wakeup needs to not block
  * 
+ * readers only: writers can't poll externally for space availability
  */
 int shr_get_selectable_fd(shr *s) {
-  int rc = -1;
+  if ((s->flags & SHR_RDONLY) &&
+      (s->flags & SHR_NONBLOCK)) return s->wait_fd;
+  return -1;
+}
 
-  if ((s->flags & SHR_RDONLY) == 0) goto done;
-  if ((s->flags & SHR_NONBLOCK) == 0) goto done;
+/* helper to open the bw library handles during shr_open 
+*
+ * called with the ring under lock 
+ *
+ * regarding need_r2w: 
+ *   it's always ok for writer to open the r2w handle.
+ *   but, we prefer not to open it, unless we need it.
+ *   if open, a reader is obligated to send wakeups
+ *   when they free space in the ring, to wake writers 
+ *   blocked in shr_write. but, in cases where the ring
+ *   is in SHR_DROP mode, or the writer is non blocking,
+ *   writes succeed or fail without needing to block. 
+ *   for these writers we leave the r2w handle closed. 
+ *   this is just for performance. if a non blocking 
+ *   writer later calls shr_flush(s,1) to do a blocking
+ *   flush, it opens the r2w handle at that time. 
+ *
+ */
+static int open_blockwake(struct shr *s, int flags) {
+  int rc = -1, sc, need_r2w;
+
+  if (flags & SHR_RDONLY) {
+    s->w2r = bw_open(BW_WAIT, &s->r->w2r, &s->wait_fd);
+    s->r2w = bw_open(BW_WAKE, &s->r->r2w);
+    if ((s->w2r == NULL) || (s->r2w == NULL)) goto done;
+    /* set initial readability of fd */
+    sc = bw_force(s->w2r, s->r->u ? 1 : 0);
+    if (sc < 0) goto done;
+  }
+  
+  if (flags & SHR_WRONLY) {
+    s->w2r = bw_open(BW_WAKE, &s->r->w2r);
+    if (s->w2r == NULL) goto done;
+    /* does writer need free-space wakeups? */
+    need_r2w =  (((s->flags & SHR_NONBLOCK) == 0) &&
+                 ((s->r->gflags & SHR_DROP) == 0)) ?  1 : 0;
+    if (need_r2w) {
+      s->r2w = bw_open(BW_WAIT, &s->r->r2w, &s->wait_fd);
+      if (s->r2w == NULL) goto done;
+    }
+  }
 
   rc = 0;
 
  done:
-  return (rc == 0) ? s->bell_fd : -1;
-}
-
-/* test pid existence; no signal is actually sent here */
-static int stale_pid(pid_t pid) {
-  int rc = kill(pid, 0);
-  if ((rc < 0) && (errno == ESRCH)) return 1;
-  return 0;
-}
-
-static int register_fifo(shr *s) {
-  int rc = -1, i, slot;
-  pid_t pid;
-
-  assert((s->flags & SHR_RDONLY) || (s->flags & SHR_WRONLY));
-  slot = (s->flags & SHR_RDONLY) ? W2R : R2W;
-
-  /* claim a slot.  invalidate a claimed slot whose owning pid is absent */
-  for(i=0; i < MAX_RWPROC; i++) {
-    pid = s->r->pids[slot][i];
-    if (pid && stale_pid(pid)) pid = 0;
-    if (pid == 0) break;
-  }
-
-  if (i == MAX_RWPROC) {
-    fprintf(stderr, "IO slots exhausted; increase MAX_RWPROC or tee rings\n");
-    goto done;
-  }
-
-  /* claim slot */
-  assert(i < MAX_RWPROC);
-  memcpy(s->r->fifos[slot][i], s->fifo, MAX_FIFO_NAME);
-  s->r->pids[slot][i] = getpid();
-  s->index = i;
-  s->r->io_seq++;
-
-  rc = 0;
-
- done:
+  if (rc && s->r2w) { bw_close(s->r2w); s->r2w = NULL; }
+  if (rc && s->w2r) { bw_close(s->w2r); s->w2r = NULL; }
   return rc;
 }
 
-/* 
- * rescan_fifos
- *
- * any time the lock is reaquired, the control region in the ring should be
- * rescanned to see if any peers registered their fifos since we last checked.
- * a simple integer is used for this; we cache the last one we saw and compare.
- *
- */
-static int rescan_fifos(shr *s) {
-  int rc = -1, i, slot;
+static int validate_flags(int flags) {
 
-  if (s->io_seq == s->r->io_seq) { /* already current */
-    rc = 0;
+  if (((flags & SHR_RDONLY) ^ (flags & SHR_WRONLY)) == 0)
+    return -1; 
+
+  if (flags & (SHR_OPEN_FENCE-1))
+    return -1;
+
+  return 0;
+}
+
+/*
+ * init_cache
+ *
+ * the cache is used to reduce lock acquisition on the ring.
+ * it is supported only for the writer side at this time.
+ * 
+ * called with s under lock
+ */
+static int init_cache(struct shr *s, int flags) {
+  int rc = -1;
+
+  if ((flags & SHR_WRONLY) == 0) return 0;
+  if ((flags & SHR_BUFFERED) == 0) return 0;
+
+ /* cache size is 10% of ring size (clamped) and 10k iov */
+  s->c.sz = s->r->n / 10;
+  if (s->c.sz > 1024*1024*1024) s->c.sz = 1024*1024*1024;
+  if (s->c.sz < 1024)           s->c.sz = s->r->n;
+  s->c.vt = MIN(10000, s->r->mm);
+
+  s->c.buf = malloc( s->c.sz );
+  if (s->c.buf == NULL) {
+    shr_log("out of memory\n");
     goto done;
   }
 
-  /* fifo registrations have been updated. to make things simple we just
-   * close the existing ones, and open them all anew. we could just check
-   * for ones we don't yet have an fd open to, that I will leave for later.
-   */
-
-  /* close the fifos */
-  for(i=0; i < MAX_RWPROC; i++) {
-    if (s->rwfd[i] == -1) continue;
-    if (close( s->rwfd[i] ) < 0) {
-      fprintf(stderr, "close: %s\n", strerror(errno));
-    }
-    s->rwfd[i] = -1;
+  s->c.iov = calloc( s->c.vt,  sizeof(struct iovec));
+  if (s->c.iov == NULL) {
+    shr_log("out of memory\n");
+    goto done;
   }
 
-  /* open fifos up, first checking their owning PID exists */
-  slot = (s->flags & SHR_RDONLY) ? R2W : W2R;
-  for(i=0; i < MAX_RWPROC; i++) {
-
-    if (*s->r->fifos[slot][i] == '\0') continue; /* empty slot */
-
-    /* if fifo owner PID is dead; unregister it and try to unlink its fifo.
-     * in this case, it's ok if unlink fails - either fifo was already unlinked,
-     * or we lack privileges or it's inaccessible- these we can ignore. */
-    if (stale_pid(s->r->pids[slot][i])) {
-      unlinkat(s->tmp_fd, s->r->fifos[slot][i], 0); /* failure is ok */
-      *(s->r->fifos[slot][i]) = '\0';               /* unregister */
-      s->r->io_seq++;
-      continue;
-    }
-
-    /* attempt to open the fifo. note that, failure here is fatally logged.
-     * there are situations (like exceeding max number of file descriptors)
-     * that are local to this process, so we do NOT unregister fifos here */
-    s->rwfd[i] = openat(s->tmp_fd, s->r->fifos[slot][i], O_RDWR);
-    if (s->rwfd[i] < 0) {
-      fprintf(stderr, "open %s: %s\n", s->r->fifos[slot][i], strerror(errno));
-      goto done;
-    }
-
-    /* fifo is now open. this fifo is for us to awaken a blocked peer. ensure
-     * we don't block in doing so, even if peer is slow to drain fifo or dies */
-    if (make_nonblock(s->rwfd[i]) < 0) goto done;
-  }
-
-  s->io_seq = s->r->io_seq;
   rc = 0;
 
  done:
+  if (rc < 0) {
+    if (s->c.buf) free(s->c.buf);
+    if (s->c.iov) free(s->c.iov);
+    s->c.buf = NULL;
+    s->c.iov = NULL;
+  }
   return rc;
 }
 
 /*
  * shr_open opens a ring 
  *
- * the ring is opened for reading only OR writing only, and must exist already
+ * the ring is opened for reading only OR writing only
+ * and must exist already
  *
  * flags:
  *    SHR_RDONLY      - open for reading 
  *    SHR_WRONLY      - open for writing
- *    SHR_GET_APPDATA - obtain "app data" pointer (char **buf, size_t *len args)
- *                      note, the app data has no particular memory alignment,
- *                      so, if a caller wants to overlay a struct on it, it
- *                      should copy the app data into a suitably aligned buffer.
- *                      also, the app data memory buffer is considered read-only
- *                      since it points into shared memory that was initialized
- *                      at ring creation. the app data pointer is valid only as
- *                      long as the caller has the ring open- until shr_close.
+ *    SHR_BUFFERED    - buffer writes
+ *    SHR_NONBLOCK    - reads/writes fail immediately
+ *                      when data/space unavailable
  *
- * returns opaque struct shr pointer on success, or NULL on error
+ * returns:
+ *  struct shr * on success (opaque to caller)
+ *  NULL on error
  *
  */
 struct shr *shr_open(char *file, unsigned flags, ...) {
+  int rc = -1, sc, prot;
   struct shr *s = NULL;
-  int rc = -1, vc, i;
-  char **app_data;
-  size_t *app_sz;
 
   va_list ap;
   va_start(ap, flags);
 
-  unsigned disallowed_flags = SHR_OPEN_FENCE-1;
-
-  if (((flags & SHR_RDONLY) && (flags & SHR_WRONLY)) || /* both r AND w    */
-      ((flags & (SHR_RDONLY | SHR_WRONLY)) == 0)     || /* neither r NOR w */
-      (flags & disallowed_flags)) {                     /* other bad flags */
-    fprintf(stderr,"shr_open: invalid mode\n");
+  if (validate_flags(flags) < 0) {
+    shr_log("shr_open: invalid flags\n");
     goto done;
   }
 
-  s = malloc( sizeof(struct shr) );
+  s = calloc(1, sizeof(struct shr));
   if (s == NULL) {
-    fprintf(stderr, "out of memory\n");
+    shr_log("out of memory\n");
     goto done;
   }
-  memset(s, 0, sizeof(*s));
   s->ring_fd = -1;
-  s->tmp_fd = -1;
-  s->bell_fd = -1;
+  s->wait_fd = -1;
   s->flags = flags;
-  s->index = -1;
-  for(i=0; i < MAX_RWPROC; i++) s->rwfd[i] = -1;
 
   s->ring_fd = open(file, O_RDWR);
   if (s->ring_fd == -1) {
-    fprintf(stderr,"open %s: %s\n", file, strerror(errno));
+    shr_log("open %s: %s\n", file, strerror(errno));
     goto done;
   }
 
   if (fstat(s->ring_fd, &s->s) == -1) {
-    fprintf(stderr,"stat %s: %s\n", file, strerror(errno));
+    shr_log("stat %s: %s\n", file, strerror(errno));
     goto done;
   }
 
-  s->buf = mmap(0, s->s.st_size, PROT_READ|PROT_WRITE, MAP_SHARED, s->ring_fd, 0);
+  /* read-write, since even readers write to ctl region */
+  prot = PROT_READ|PROT_WRITE;
+
+  s->buf = mmap(0, s->s.st_size, prot, MAP_SHARED, s->ring_fd, 0);
   if (s->buf == MAP_FAILED) {
-    fprintf(stderr, "mmap %s: %s\n", file, strerror(errno));
-    goto done;
-  }
-
-  char *shm = "/dev/shm", *tmp = "/tmp";
-  char *dir = (access(shm, F_OK) == 0) ? shm : tmp;
-
-  s->tmp_fd = open(dir, O_DIRECTORY|O_PATH);
-  if (s->tmp_fd < 0) {
-    fprintf(stderr, "open %s: %s\n", dir, strerror(errno));
-    goto done;
-  }
-
-  /* name our fifo with pid/tid/sequence number (up to maxtries)
-   * to generate a unique fifo name. the purpose is that one caller
-   * thread should be able to open multiple shr rings; we need
-   * a uniquely named notification fifo for each one. */
-  pid_t pid = getpid();
-  pid_t tid = syscall(SYS_gettid);
-  int seq = 0, max_tries=100;
-
- again:
-  snprintf(s->fifo, sizeof(s->fifo), "fifo.%u.%u.%u", pid, tid, seq);
-  if (mkfifoat(s->tmp_fd, s->fifo, CREAT_MODE) < 0) {
-    if ((errno == EEXIST) && (seq++ < max_tries)) goto again;
-    fprintf(stderr, "mkfifo %s: %s\n", s->fifo, strerror(errno));
-    goto done;
-  }
-
-  s->bell_fd = openat(s->tmp_fd, s->fifo, O_RDWR); 
-  if (s->bell_fd < 0) {
-    fprintf(stderr, "open %s: %s\n", s->fifo, strerror(errno));
+    shr_log("mmap %s: %s\n", file, strerror(errno));
+    s->buf = NULL;
     goto done;
   }
 
   if (lock(s->ring_fd) < 0) goto done;
-
-  vc = validate_ring(s);
-  if (vc < 0) {
-    fprintf(stderr, "validate_ring failed: %s (%d)\n", file, vc);
+  sc = validate_ring(s);
+  if (sc < 0) {
+    shr_log("validate_ring failed: %s (%d)\n", file, sc);
     goto done;
   }
 
-  if (register_fifo(s) < 0) goto done;
-  if (rescan_fifos(s) < 0) goto done;
-  if (refresh_bell(s) < 0) goto done;
+  s->q = s->r->q;
+  s->n = s->r->n;
+  s->mm = s->r->mm;
 
-  if (flags & SHR_GET_APPDATA) {
-    app_data = va_arg(ap, char **);
-    app_sz   = va_arg(ap, size_t*);
-    *app_data = s->r->app_data_len ? (s->r->d + s->r->n) : NULL;
-    *app_sz = s->r->app_data_len;
+  /* prefault and lock pages in memory if requested */
+  sc = (s->r->gflags & SHR_MLOCK) ? mlock(s->buf, s->s.st_size) : 0;
+  if (sc < 0) {
+    shr_log("mlock: %s\n", strerror(errno));
+    goto done;
   }
 
+  if (open_blockwake(s, flags) < 0) goto done;
+  if (init_cache(s, flags) < 0) goto done;
+  if (shr_sync(s) < 0) goto done;
   rc = 0;
 
  done:
   if (s && (s->ring_fd != -1)) unlock(s->ring_fd);
-  if ((rc < 0) && s) {
-    if ((s->tmp_fd != -1) && (*s->fifo != '\0')) unlinkat(s->tmp_fd, s->fifo, 0);
-    if (s->tmp_fd != -1) close(s->tmp_fd);
+  if (s && rc) {
     if (s->ring_fd != -1) close(s->ring_fd);
-    if (s->bell_fd != -1) close(s->bell_fd);
-    if (s->buf && (s->buf != MAP_FAILED)) munmap(s->buf, s->s.st_size);
+    if (s->buf) munmap(s->buf, s->s.st_size);
     free(s);
     s = NULL;
   }
@@ -636,96 +624,61 @@ struct shr *shr_open(char *file, unsigned flags, ...) {
 }
 
 /* 
- * to ring the bell we write a byte (non-blocking) to a fifo. this notifies
- * the peer. if the fifo is full we consider this to have succeeded, because
- * the point of the fifo is to be readable when data is available; a full fifo
- * satisfies that need.  it is harmless (except for inefficiency) to ring it
- * superfluously; the peer wakes up, checks the condition and reblocks if so.
-*/
-static int ring_bell(struct shr *s) {
-  char b = '1'; /* arbitrary; just a wakeup */
-  int rc = -1, i;
-  ssize_t n;
-
-  for(i=0; i < MAX_RWPROC; i++) {
-    if (s->rwfd[i] == -1) continue;
-    n = write(s->rwfd[i], &b, sizeof(b));
-    if (n < 0) {
-      if ((errno == EWOULDBLOCK) | (errno == EAGAIN)) continue;
-      fprintf(stderr, "write: %s\n", strerror(errno));
-    }
-  }
-
-  rc = 0;
-
-  return rc;
-}
-
-/* read the fifo, causing us to block, awaiting notification from the peer.
- * for a reader process, the notification (fifo readability) means that we
- * should check the ring for new data. for a writer process, the notification
- * means that space has become available in the ring. 
+ * reclaim unread messages from the ring (SHR_DROP mode).
+ * The oldest portion of ring data is sacrificed.
  *
- * returns 0 on normal wakeup, 
- *        -1 on error, 
- *        -2 on signal while blocked
- */
-static int block(struct shr *s) {
-  int rc = -1;
-  ssize_t nr;
-  char b;
-
-  if (make_blocking(s->bell_fd) < 0) goto done;
-
-  nr = read(s->bell_fd, &b, sizeof(b)); /* block */
-  if (nr < 0) {
-    if (errno == EINTR) rc = -2;
-    else fprintf(stderr, "read: %s\n", strerror(errno));
-    goto done;
-  }
-
-  rc = 0;
-
- done:
-  return rc;
-}
-
-/* helper function; given ring offset o (pointing to a message length prefix)
- * read it, taking into account the possibility that the prefix wraps around */
-static size_t get_msg_len(struct shr *s, size_t o) {
-  size_t msg_len, hdr = sizeof(size_t);
-  assert(o < s->r->n);
-  assert(s->r->u >= hdr);
-  size_t b = s->r->n - o; /* bytes at o til wrap */
-  memcpy(&msg_len, &s->r->d[o], MIN(b, hdr));
-  if (b < hdr) memcpy( ((char*)&msg_len) + b, s->r->d, hdr-b);
-  return msg_len;
-}
-
-/* 
- * this function is called under lock to forcibly reclaim space from the ring,
- * (SHR_DROP mode). The oldest portion of ring data is sacrificed.
+ * called under lock 
  *
- * if this is a ring of messages (SHR_MESSAGES), preserve boundaries by 
- * moving the read position to the nearest message at or after delta bytes.
+ * preserves message boundaries by moving the read position 
+ * to the now-eldest message after dropping to satisfy need
  */
-static void reclaim(struct shr *s, size_t delta) {
-  size_t o, reclaimed=0, msg_len;
+static void reclaim(struct shr *s, size_t need, size_t niov) {
+  size_t ab, am, i, e, z;
+  shr_ctrl *r = s->r;
+  struct msg *mv;
 
-  if (s->r->gflags & SHR_MESSAGES) {
-    for(o = s->r->o; reclaimed < delta; reclaimed += msg_len) {
-      msg_len = get_msg_len(s,o) + sizeof(size_t);
-      o = (o + msg_len ) % s->r->n;
-      s->r->stat.md++; /* msg drops */
-      s->r->m--;       /* msgs in ring */
-    }
-    delta = reclaimed;
+  ab = r->n - r->u;  /* available bytes */
+  am = r->mm - r->m; /* available messages */
+
+  mv = (struct msg*)(r->d + r->n + r->pad_len);
+
+  assert(r->gflags & SHR_DROP);
+  assert(r->mm >= niov);
+  assert(r->m <= r->mp);
+  assert(r->m <= r->mm);
+  assert(r->mp);
+
+  i = 0;
+  z = 0;
+  e = r->e;
+
+  /* drop messages to free enough space */
+  while (need > ab+z) {
+    z += mv[ e ].len;
+    i++;
+    e++;
+    if (e == s->mm) e = 0;
   }
 
-  assert(delta <= s->r->u);
-  s->r->o = (s->r->o + delta) % s->r->n;
-  s->r->u -= delta;
-  s->r->stat.bd += delta; /* bytes dropped */
+  /* drop messages to free enough slots */
+  while (niov > am+i) {
+    z += mv[ e ].len;
+    i++;
+    e++;
+    if (e == s->mm) e = 0;
+  }
+
+  r->u -= z;
+  r->stat.bd += z;
+  r->stat.md += i;
+  r->mp -= i;
+  r->m -= i;
+  r->r = ( r->r + i ) % r->mm;
+  r->e = ( r->e + i ) % r->mm;
+  r->q += i;
+
+  assert(r->n - r->u >= need);
+  assert(r->mm - r->m >= niov);
 }
 
 /*
@@ -739,7 +692,6 @@ static void reclaim(struct shr *s, size_t delta) {
  *   > 0 (number of bytes copied into ring, always the full buffer)
  *   0   (insufficient space in ring, in non-blocking mode)
  *  -1   (error, such as the buffer exceeds the total ring capacity)
- *  -2   (signal arrived while blocked waiting for ring)
  *
  */
 ssize_t shr_write(struct shr *s, char *buf, size_t len) {
@@ -751,21 +703,74 @@ ssize_t shr_write(struct shr *s, char *buf, size_t len) {
  * shr_read
  *
  * Read from the ring. 
- * In SHR_MESSAGES mode, each read returns exactly one message.
+ * Each read returns exactly one message.
  * Block if ring empty, or return immediately in SHR_NONBLOCK mode.
  *
  * returns:
  *   > 0 (number of bytes read from the ring)
  *   0   (ring empty, in non-blocking mode)
  *  -1   (error)
- *  -2   (signal arrived while blocked waiting for ring)
- *  -3   (buffer can't hold message; SHR_MESSAGE mode)
+ *  -2   (buffer can't hold message)
  *   
  */
 ssize_t shr_read(struct shr *s, char *buf, size_t len) {
   struct iovec io = {.iov_base = buf, .iov_len = len };
-  int one = 1;
+  size_t one = 1;
   return shr_readv(s, buf, len, &io, &one);
+}
+
+
+/*
+ * next_msg_info
+ *
+ * without advancing afterward, return the buffer
+ * position and length of the next available message.
+ * actually, return two buffers and two lengths. why?
+ * because the message may wrap around the end of ring 
+ *
+ * called with ring under lock
+ *
+ * returns
+ *    0  (no message ready) 
+ *    1  message is ready
+ */
+static int next_msg_info(shr *s, char **m1, size_t *l1,
+                                 char **m2, size_t *l2 ) {
+  int msg_ready, msg_wraps;
+  size_t slot, len, pos;
+  shr_ctrl *r = s->r;
+  struct msg *mv;
+
+  mv = (struct msg*)(r->d + r->n + r->pad_len);
+
+  /* if farm reader's "next read" sequence number has
+   * passed out of ring, advance to eldest available */
+  if ((r->gflags & SHR_FARM) && (s->q < r->q)) {
+    s->md += (r->q - s->q); 
+    s->q = r->q;
+  }
+
+  if (r->gflags & SHR_FARM)
+    msg_ready = (s->q < r->q + r->mp) ? 1 : 0;
+  else
+    msg_ready = r->m ? 1 : 0;
+
+  if (msg_ready == 0) return 0;
+
+  /* what slot in mv points to the next message? */
+  slot = (r->gflags & SHR_FARM) ?
+         (s->q % r->mm) :
+         r->r;
+
+  pos = mv[ slot ].pos;
+  len = mv[ slot ].len;
+  msg_wraps = (pos + len > r->n) ? 1 : 0;
+
+  *m1 = &r->d[ pos ];
+  *l1 = msg_wraps ? (r->n - pos) : len;
+  *m2 = msg_wraps ? r->d : NULL;
+  *l2 = msg_wraps ? (len - *l1) : 0;
+  return 1;
 }
 
 /*
@@ -774,9 +779,8 @@ ssize_t shr_read(struct shr *s, char *buf, size_t len) {
  * also see shr_read
  *
  * the function copies ring data into buf, and populates the struct iovec
- * array so each one points to a message in buf (when in message mode); in
- * byte mode, only the first iovec is populated. the caller provides the
- * uninitialized array of iov and this function fills them in. iovcnt is an
+ * array so each one points to a message in buf.  the caller provides the
+ * uninitialized array of iov and this function fills them in. niov is an
  * IN/OUT parameter; on input it's the number of structures in iov, and on
  * output it's how many this function filled in.
  *
@@ -784,111 +788,119 @@ ssize_t shr_read(struct shr *s, char *buf, size_t len) {
  *   > 0 (number of bytes read from the ring)
  *   0   (no data in ring, in non-blocking mode)
  *  -1   (error)
- *  -2   (signal arrived while blocked waiting for ring)
- *  -3   (buffer can't hold message; SHR_MESSAGE mode)
+ *  -2   (buffer can't hold message)
+ *  -3   (caller descriptor became ready while blocked; see bw_ctl BW_POLLFD)
  *
  */
-ssize_t shr_readv(shr *s, char *buf, size_t len, struct iovec *iov, int *iovcnt) {
-  int rc = -1;
+ssize_t
+shr_readv(shr *s, char *buf, size_t len, struct iovec *iov, size_t *niov) {
+  int sc, rc = -1, msg_ready;
+  size_t mc = 0, l1, l2;
   shr_ctrl *r = s->r;
-  size_t nr=0, msg_len, b, mc=0, iovleft;
+  char *m1, *m2;
+  ssize_t nr=0;
 
-  iovleft = *iovcnt;
-  *iovcnt = 0;
-
-  /* since this function returns signed, cap len */
-  if (len > SSIZE_MAX) len = SSIZE_MAX;
   if (len == 0) goto done;
-  if (iovleft == 0) goto done;
+  if (*niov == 0) goto done;
+  if (len > SSIZE_MAX) len = SSIZE_MAX;
 
- again:
-  rc = -1;
-  if (lock(s->ring_fd) < 0) goto done;
-  if (rescan_fifos(s) < 0) goto done;
+  /* test or await data availability */
+  while (1) {
 
-  if (s->r->u == 0) { /* nothing to read */
-    if (s->flags & SHR_NONBLOCK) { rc = 0; goto done; } 
-    else goto block;
+    sc = lock(s->ring_fd);
+    if (sc < 0) goto done;
+
+    msg_ready = next_msg_info(s, &m1, &l1, &m2, &l2);
+    if (msg_ready) break;
+
+    if (s->flags & SHR_NONBLOCK) {
+      bw_force(s->w2r, 0);
+      rc = 0;
+      goto done;
+    }
+
+    /* blocking wait. awake/retry */
+    unlock(s->ring_fd);
+    sc = bw_wait_ul(s->w2r);
+    if (sc) {
+      rc = sc; /* see bw_ctl BW_POLLFD */
+      goto done;
+    }
   }
 
-  /* data IS available in ring */
-  assert(s->r->u > 0);
-
-  if ((s->r->gflags & SHR_MESSAGES) == 0) { /* byte mode */
-    *iovcnt = 1;
-    nr = MIN(len, s->r->u);
-    iov[0].iov_len = nr;
-    iov[0].iov_base = buf;
-    if (s->r->o < s->r->i) { 
-      /* readable region is one extent */
-      memcpy(buf, &s->r->d[s->r->o], nr);
-    } else {
-      /* readable region is two parts */
-      b = s->r->n - s->r->o;
-      memcpy(buf, &s->r->d[s->r->o], MIN(b, nr));
-      if (b < nr) memcpy(&buf[b], s->r->d, nr-b);
-    }
-    s->r->u -= nr;
-    s->r->o = (s->r->o + nr) % s->r->n;
-
-    rc = 0;
-    goto done;
-  }
-
-  /* message mode here */
-  assert(s->r->gflags & SHR_MESSAGES);
-
-  /* limiting factor in the amount of data we can read is one of:
-   *  (a) buf fills up
-   *  (b) iov exhausted
-   *  (c) ring exhausted
-   */
-  while(1) {
-    if (s->r->u == 0) break;
-    if (iovleft == 0) break;
-    msg_len = get_msg_len(s, r->o);
-    if (msg_len > len) {
-      if (mc == 0) { rc = -3; goto done; }
-      break;
-    }
-    assert(s->r->u >= msg_len + sizeof(msg_len));
-    s->r->u -= sizeof(msg_len);
-    s->r->o = (s->r->o + sizeof(msg_len)) % s->r->n;
-    nr += msg_len;
+  /* reached when data is available */
+  while (msg_ready) {
+    if (*niov == 0)  break; /* caller iov exhausted */
+    if (l1+l2 > len) break; /* caller buf exhausted */
     iov[mc].iov_base = buf;
-    iov[mc].iov_len = msg_len;
-    b = (s->r->i <= s->r->o) ? (s->r->n - s->r->o) : (s->r->i - s->r->o);
-    memcpy(buf, &s->r->d[s->r->o], MIN(b, msg_len));
-    if (msg_len > b) memcpy(&buf[b], s->r->d, msg_len-b);
-    buf += msg_len;
-    len -= msg_len;
-    s->r->u -= msg_len;
-    s->r->o = (s->r->o + msg_len) % s->r->n;
-    s->r->m--;
+    iov[mc].iov_len = l1+l2;
+    memcpy(buf, m1, l1);
+    if (l2)
+      memcpy(buf + l1, m2, l2);
+    buf += (l1+l2);
+    len -= (l1+l2);
+    nr +=  (l1+l2);
+    (*niov)--;
     mc++;
-    iovleft--;
+
+    /* advance read position */
+    if (r->gflags & SHR_FARM) s->q++;
+    else {
+      r->r = (r->r + 1) % r->mm;
+      r->u -= (l1+l2);
+      r->m--;
+    }
+
+    msg_ready = next_msg_info(s, &m1, &l1, &m2, &l2);
   }
 
-  *iovcnt = mc;
-  rc = 0;
+  r->stat.br += nr;
+  r->stat.mr += mc;
+  if (nr > 0) bw_wake(s->r2w);
+  rc = (mc > 0) ? 0 : -2;
+  bw_force(s->w2r, msg_ready);
+  if (shr_sync(s) < 0) goto done;
 
  done:
-
-  refresh_bell(s);
-
-  if (rc == 0) {
-    if (nr > 0) ring_bell(s); /* ring peer bells if space freed */
-    s->r->stat.br += (nr + (mc * sizeof(msg_len)));
-    s->r->stat.mr += mc;
-  }
-
   unlock(s->ring_fd);
+  *niov = mc;
   return (rc == 0) ? (ssize_t)nr : rc;
- 
- block:
-  unlock(s->ring_fd);
-  block(s);
-  goto again;
+}
+
+/*
+ * advance_eldest
+ *
+ * accomodate 'len' bytes of overwrite 
+ * (from r->i). if it will overwrite
+ * eldest message(s) then advance eldest
+ *
+ * called with ring under lock
+ *
+ */
+static void advance_eldest(shr *s, size_t len) {
+  shr_ctrl *r = s->r;
+  struct msg *mv;
+  size_t ep, el, eoe, eow;
+  int wsie, weie;
+
+  mv = (struct msg*)(r->d + r->n + r->pad_len);
+
+  while(r->mp) {
+    ep = mv[ r->e ].pos;
+    el = mv[ r->e ].len;
+
+    eoe = (ep + el) % r->n;
+    eow = (r->i + len) % r->n;
+
+    wsie = ((r->i >= ep) && (r->i < eoe)) ? 1 : 0;
+    weie = ((eow > ep) && (eow <= eoe)) ? 1: 0;
+
+    if ((wsie == 0) && (weie == 0)) break;
+
+    r->e = (r->e + 1) % r->mm;
+    r->mp--;
+    r->q++;
+  }
 }
 
 /*
@@ -897,145 +909,337 @@ ssize_t shr_readv(shr *s, char *buf, size_t len, struct iovec *iov, int *iovcnt)
  * if there is sufficient space in the ring - copy the whole iovec in.
  * if there is insufficient free space in the ring- wait for space, or
  * return 0 immediately in non-blocking mode. only writes all or nothing.
- * in message mode (SHR_MESSAGES) each iovec element becomes one message.
+ * each iovec element becomes one message.
  *
  * returns:
  *   > 0 (number of bytes copied into ring, always the full iovec)
  *   0   (insufficient space in ring, in non-blocking mode)
  *  -1   (error, such as the iovec exceeds the total ring capacity)
- *  -2   (signal arrived while blocked waiting for ring)
+ *  -2   (not used)
+ *  -3   (caller descriptor became ready while blocked; see bw_ctl BW_POLLFD)
  *
  */
-ssize_t shr_writev(shr *s, struct iovec *iov, int iovcnt) {
-  int rc = -1, i;
+ssize_t shr_writev(shr *s, struct iovec *iov, size_t niov) {
+  size_t bsz, len=0, i, l1, l2;
+  int rc = -1, sc, msg_wraps;
   shr_ctrl *r = s->r;
+  struct msg *mv;
+  ssize_t nr;
   char *buf;
-  size_t bsz, a, b, len=0;
-  size_t hdr = (s->r->gflags & SHR_MESSAGES) ? (sizeof(bsz) * iovcnt): 0;
 
-  for(i = 0; i < iovcnt; i++) {
-    if (iov[i].iov_len == 0) goto done; // disallow zero length messages
-    if ((len + iov[i].iov_len) < len) goto done; // overflow
+  for(i=0; i < niov; i++) {
     len += iov[i].iov_len;
+    if (len == 0) goto done;
+    if (len > SSIZE_MAX) goto done;
+    if (len > s->n) goto done;
+    if (niov > s->mm) goto done;
+  }
+  if (len == 0) goto done;
+
+  while (s->flags & SHR_BUFFERED) {
+
+    /* sink writev into cache if it fits.
+     * cache only as much can be flushed 
+     * at once to an empty ring */
+    if ((len  <= (s->c.sz - s->c.n))  &&
+        (niov <= (s->c.vt - s->c.vm))) {
+      for(i=0; i < niov; i++) {
+        memcpy(s->c.buf + s->c.n, iov[i].iov_base, iov[i].iov_len);
+        s->c.iov[ s->c.vm ].iov_base = s->c.buf + s->c.n;
+        s->c.iov[ s->c.vm ].iov_len = iov[i].iov_len;
+        s->c.n += iov[i].iov_len;
+        s->c.vm++;
+      }
+      return len;
+    }
+
+    /* didn't fit. flush cache, then either
+     * cache current write, or conduct now */
+    if (s->c.n == 0) break;
+    s->flags &= ~SHR_BUFFERED;
+    nr = shr_writev(s, s->c.iov, s->c.vm);
+    s->flags |=  SHR_BUFFERED;
+    if (nr <= 0) return nr;
+    s->c.n = 0;
+    s->c.vm = 0;
   }
 
-  if (len > SSIZE_MAX) goto done;    // this function returns signed, so cap len
-  if (len + hdr > s->r->n) goto done;// does buffer exceed total ring capacity
-  if (len == 0) goto done;           // zero length writes/messages are an error
+  while (1) {
+    if (lock(s->ring_fd) < 0) goto done;
 
- again:
-  rc = -1;
-  if (lock(s->ring_fd) < 0) goto done;
-  if (rescan_fifos(s) < 0) goto done;
-  
-  a = r->n - r->u;      // total free space in ring
-  if (len + hdr > a) {  // if more space is needed...
-    if (s->r->gflags & SHR_DROP) reclaim(s, len+hdr - a);
-    else if (s->flags & SHR_NONBLOCK) { rc = 0; len = 0; goto done; }
-    else goto block;
+    /* if ring has enough free space, break */
+    if ((r->n - r->u >= len) && 
+        (r->mm - r->m >= niov)) break;
+
+    if (r->gflags & SHR_DROP) {
+      reclaim(s, len, niov);
+      break;
+    }
+
+    if (s->flags & SHR_NONBLOCK) {
+      rc = 0;
+      len = 0;
+      goto done;
+    }
+
+    unlock(s->ring_fd);
+    sc = bw_wait_ul(s->r2w);
+    if (sc) return sc;
   }
-  assert(r->n - r->u >= len + hdr); // enough space now exists in ring
 
-  for(i=0; i < iovcnt; i++) {
+  assert(r->n - r->u >= len);
+  assert(r->m + niov <= r->mm);
+  assert(r->mp <= r->mm);
+  mv = (struct msg*)(r->d + r->n + r->pad_len);
+
+  /* at this point, sufficient free space in the
+   * ring and enough mv slots are available.
+   * if we're about to overwrite the eldest read 
+   * message(s) we need to advance eldest too. */
+  advance_eldest(s, len);
+
+  for(i=0; i < niov; i++) {
 
     buf = iov[i].iov_base;
     bsz = iov[i].iov_len;
+    assert(bsz > 0);
 
-    a = r->n - r->u;
-    if (r->i < r->o) {   // free space is one buffer; has unread data after it
-      b = a;             // free "part" starting at r->i is the full free space
-    } else if (r->i == r->o) { // the ring is full (u ==n) or empty (u == 0)
-      b = a ? (r->n - r->i) : 0; // free part starting at r->i is tail, or 0
-    } else {           // ring free space consists of two wrapped parts
-      b = r->n - r->i; // free part at r->i abuts ring-end, gets leading input
-    }
+    mv[ ( r->e + r->mp ) % r->mm].pos = r->i;
+    mv[ ( r->e + r->mp ) % r->mm].len = bsz;
 
-    if (hdr) {
-      char *l = (char*)&bsz;
-      memcpy(&r->d[r->i], l, MIN(b, sizeof(bsz)));
-      if (sizeof(bsz) > b) memcpy(r->d, l + b, sizeof(bsz)-b);
-      r->i = (r->i + sizeof(bsz)) % r->n;
-      r->u += sizeof(bsz);
+    msg_wraps = (r->i + bsz > r->n) ? 1 : 0;
+    l1 = msg_wraps ? (r->n - r->i) : bsz;
+    l2 = msg_wraps ? (bsz - l1) : 0;
 
-      /* patch up b */
-      a = r->n - r->u;
-      if (r->i < r->o) {   // free space is one buffer; has unread data after it
-        b = a;             // free "part" starting at r->i is the full free space
-      } else if (r->i == r->o) { // the ring is full (u ==n) or empty (u == 0)
-        assert (0);        // branch should not occur between msg hdr and body
-        b = a ? (r->n - r->i) : 0; // free part starting at r->i is tail, or 0
-      } else {           // ring free space consists of two wrapped parts
-        b = r->n - r->i; // free part at r->i abuts ring-end, gets leading input
-      }
-    }
-
-    memcpy(&r->d[r->i], buf, MIN(b, bsz));
-    if (bsz > b) memcpy(r->d, &buf[b], bsz-b);
+    memcpy(r->d + r->i, buf, l1);
+    if (l2) memcpy(r->d, buf + l1, l2);
     r->i = (r->i + bsz) % r->n;
     r->u += bsz;
+    r->mp++;
+    r->m++;
   }
 
-  ring_bell(s);
+  sc = bw_wake(s->w2r);
+  if (sc) goto done;
+  r->stat.bw += len;
+  r->stat.mw += niov;
+  if (shr_sync(s) < 0) goto done;
   rc = 0;
 
  done:
-  s->r->stat.bw += ((rc == 0) && len) ? (len + hdr) : 0;
-  s->r->stat.mw += ((rc == 0) && len && hdr) ? iovcnt : 0;
-  s->r->m += ((rc == 0) && len && hdr) ? iovcnt : 0;
   unlock(s->ring_fd);
   return (rc == 0) ? (ssize_t)len : -1;
-
- block:
-  unlock(s->ring_fd);
-  block(s);
-  goto again;
 }
 
-void shr_close(struct shr *s) {
-  int slot, i, mc;
+/*
+ * get and/or set the "app data" under lock
+ * 
+ * TO Get the data only: 
+ *   pass set as NULL.
+ *   if *get is NULL then malloc'd buffer is 
+ *   placed into *get of size *sz, and 
+ *   caller must eventually free it.
+ *   otherwise, if *get is non-NULL and *sz
+ *   is sufficiently large, then the data
+ *   is stored into *get and *sz is set to
+ *   the actual content length.
+ *
+ * TO Set the data only:
+ *   pass get as NULL.
+ *   pass set as the buffer of size *sz
+ *
+ * TO both get and then set the data at once:
+ *   pass *get and set as non-NULL 
+ *   and *sz to their length
+ *
+ * returns:
+ *  0 success
+ * -1 error (zero len data, size mismatch, or lock error)
+ */
+int shr_appdata(shr *s, void **get, void *set, size_t *sz) {
+  shr_ctrl *r = s->r;
+  int rc = -1;
+  char *ad;
 
-  /* unregister our fifo under lock. 
-   * if this were to fail for some reason it is ok. the next process to open
-   * the ring would find the fifo unlinked and unregister it for us. */
+  if (lock(s->ring_fd) < 0) goto done;
+  if (r->app_len == 0) goto done;
 
-  slot = (s->flags & SHR_RDONLY) ? W2R : R2W;
-  if (lock(s->ring_fd) < 0) goto finish;
+  /* appdata is stored after ring data and after mv list */
+  ad = r->d + r->n + r->pad_len + r->mv_len;
 
-  assert(s->index != -1);
-  mc = memcmp(s->r->fifos[slot][s->index], s->fifo, MAX_FIFO_NAME);
-  assert(mc == 0);
-  *s->r->fifos[slot][s->index] = '\0';
-  s->r->pids[slot][s->index] = 0;
-  s->r->io_seq++;
-
-  unlock(s->ring_fd);
-
- finish:
-
-  /* close peer notification fd's */
-  for(i=0; i < MAX_RWPROC; i++) {
-    if (s->rwfd[i] == -1) continue;
-    close( s->rwfd[i] );
+  if ((get != NULL) && (*get == NULL) && (set == NULL)) {
+    *sz = r->app_len;
+    *get = malloc(*sz);
+    if (*get == NULL) {
+      shr_log("out of memory\n");
+      goto done;
+    }
   }
 
-  /* unlink our own notification fifo */
-  assert(s->tmp_fd != -1);
-  assert(*s->fifo != '\0');
-  unlinkat(s->tmp_fd, s->fifo, 0);
+  if ((get != NULL) && (*get != NULL) && (set == NULL)) {
+    if (*sz < r->app_len) goto done;
+    memcpy(*get, ad, *sz);
+    *sz = r->app_len;
+  }
 
-  /* dirfd to /dev/shm or /tmp */
-  assert(s->tmp_fd != -1);
-  close(s->tmp_fd);
+  if ((get == NULL) && (set != NULL)) {
+    if (*sz != r->app_len) goto done;
+    memcpy(ad, set, *sz);
+  }
 
-  /* fd open on our own notify fifo */
-  assert(s->bell_fd != -1);
-  close(s->bell_fd);
+  if ((get != NULL) && (*get != NULL) && (set != NULL)) {
+    if (*sz != r->app_len) goto done;
+    memcpy(*get, ad, *sz);
+    memcpy(ad, set, *sz);
+  }
 
-  /* ring file */
-  assert(s->ring_fd != -1);
-  close(s->ring_fd);
-  assert(s->buf && (s->buf != MAP_FAILED));
+  if (shr_sync(s) < 0) goto done;
+  rc = 0;
+
+ done:
+  unlock(s->ring_fd);
+  return rc;
+}
+
+/*
+ * shr_flush
+ *
+ * flush write buffer for an SHR_BUFFERED ring
+ *
+ * NOTE
+ *  for a ring in NON-BLOCKING mode, this may return 0
+ *  if the ring is too full to accept the cached data!
+ *
+ * wait parameter:
+ *  if non-zero, causes a blocking flush. this only matters
+ *  if the ring is open for non-blocking writes.
+ *
+ * returns:
+ *
+ *  >= 0 bytes written to ring (see NOTE!)
+ *   < 0 error
+ */
+ssize_t shr_flush(struct shr *s, int wait) {
+  int toggled = 0;
+  ssize_t nr = -1;
+
+  assert(s->flags & SHR_WRONLY);
+
+  if (s->c.n == 0) {
+    nr = 0;
+    goto done;
+  }
+
+  /* non-blocking caller wants blocking flush? */
+  if ((s->flags & SHR_NONBLOCK) && wait) {
+
+    s->flags &= ~SHR_NONBLOCK;
+    toggled = 1;
+
+    /* to block, a writer needs the r2w handle */
+    if (s->r2w == NULL) {
+      if (lock(s->ring_fd) < 0) goto done;
+      s->r2w = bw_open(BW_WAIT, &s->r->r2w, &s->wait_fd);
+      unlock(s->ring_fd);
+      if (s->r2w == NULL) goto done;
+    }
+  }
+
+  s->flags &= ~SHR_BUFFERED;
+  nr = shr_writev(s, s->c.iov, s->c.vm);
+  s->flags |=  SHR_BUFFERED;
+  if (nr < 0) goto done;
+  if (nr > 0) {
+    s->c.n = 0;
+    s->c.vm = 0;
+  }
+
+ done:
+  if (toggled) s->flags |= SHR_NONBLOCK;
+  return nr;
+}
+
+/*
+ * shr_close
+ *
+ * NOTE: 
+ *
+ *  a writer in SHR_NONBLOCK|SHR_BUFFERED mode
+ *  can do a blocking flush by shr_flush(s,1);
+ *  before shr_close to flush any cached data.
+ *  otherwise a non-blocking buffered writer
+ *  gets only a non-blocking final flush.
+ *
+ */
+void shr_close(struct shr *s) {
+  
+  /* flush cache */
+  if (s->c.n) shr_flush(s,0);
+
+  /* release bw handles under lock.
+   * don't close s->wait_fd- bw does! */
+  if (lock(s->ring_fd) < 0) goto end;
+  if (s->w2r) bw_close(s->w2r);
+  if (s->r2w) bw_close(s->r2w);
+  unlock(s->ring_fd);
+
+ end:
+  /* free the cache if any */
+  if (s->c.buf) free(s->c.buf);
+  if (s->c.iov) free(s->c.iov);
+  /* unmap the ring buffer */
+  assert(s->buf);
   munmap(s->buf, s->s.st_size);
-
+  close(s->ring_fd);
   free(s);
 }
+
+/*
+ * shr_ctl
+ *
+ * special purpose miscellaneous api
+ * flag determines behavior
+ *
+ *  flag          arguments  meaning
+ *  -----------   ---------  ----------------------------------------------
+ *  SHR_POLLFD    int fd     add fd to epoll set when blocked internally in
+ *                           shr_read/write, cause it to return -3 if ready
+ *
+ * returns
+ *  0 on success
+ * -1 on error
+ */
+int shr_ctl(shr *s, int flag, ...) {
+  int rc = -1, fd, sc;
+
+  va_list ap;
+  va_start(ap, flag);
+
+  switch(flag) {
+
+    case SHR_POLLFD:
+      fd = (int)va_arg(ap, int);
+
+      /* add the fd to be monitored to the "wait" mode bw depending on r vs w */
+      sc = 0;
+      if ((s->flags & SHR_WRONLY) && s->r2w) sc = bw_ctl(s->r2w, BW_POLLFD, fd);
+      if  (s->flags & SHR_RDONLY)            sc = bw_ctl(s->w2r, BW_POLLFD, fd);
+      if (sc < 0) {
+        shr_log("bw_ctl: error\n");
+        goto done;
+      }
+      break;
+
+    default:
+      shr_log("shr_ctl: unknown flag %d\n", flag);
+      goto done;
+      break;
+  }
+
+  rc = 0;
+
+ done:
+  va_end(ap);
+  return rc;
+}
+

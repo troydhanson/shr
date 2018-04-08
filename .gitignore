@@ -13,3 +13,16 @@ Makefile
 config.log
 config.status
 .deps
+.gdb_history
+*.out
+m4
+config.guess
+config.sub
+.libs
+*.la
+*.lo
+libtool
+ltmain.sh
+test[0-9]
+test[0-9][0-9]
+perf

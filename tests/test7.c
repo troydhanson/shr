@@ -2,17 +2,18 @@
 #include <unistd.h>
 #include "shr.h"
 
-char *ring = __FILE__ ".ring";
+char *ring = "/dev/shm/" __FILE__ ".ring";
 char *data = "abcdefghi";
 
 char out[10];
 
 int main() {
+  setlinebuf(stdout);
  struct shr *s=NULL,*t=NULL;
  int rc = -1;
 
  unlink(ring);
- if (shr_init(ring, 6, 0) < 0) goto done;
+ if (shr_init(ring, 11, 0) < 0) goto done;
 
  s = shr_open(ring, SHR_RDONLY);
  if (s == NULL) goto done;
@@ -57,5 +58,6 @@ done:
  printf("end\n");
  if (s) shr_close(s);
  if (t) shr_close(t);
+ unlink(ring);
  return rc;
 }

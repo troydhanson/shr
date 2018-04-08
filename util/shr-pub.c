@@ -156,10 +156,10 @@ int handle_signal(void) {
 }
 
 int handle_io(void) {
-  int rc = -1, iovcnt;
+  int rc = -1;
   ssize_t rv, wc;
   char *b;
-  size_t n;
+  size_t n, iovcnt;
 
   switch(cfg.mode) {
     case mode_pub:
@@ -167,7 +167,9 @@ int handle_io(void) {
         rv = shr_readv(cfg.ring, cfg.buf, BATCH_BYTES, cfg.iov, &iovcnt);
         if (rv < 0) fprintf(stderr, "shr_readv: error\n");
         if (rv > 0) {
-          if (cfg.verbose) fprintf(stderr,"shr_readv: %d frames\n", iovcnt);
+          if (cfg.verbose) {
+            fprintf(stderr,"shr_readv: %zu frames\n", iovcnt);
+          }
           /* send data to client. this is a blocking, fully draining loop */
           b = cfg.buf;
           n = rv;

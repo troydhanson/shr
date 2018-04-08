@@ -1,275 +1,71 @@
-#include <stdio.h>
+#include <sys/signalfd.h>
+#include <signal.h>
 #include <string.h>
-#include <sys/wait.h>
-#include <sys/time.h>
-#include <assert.h>
-#include <errno.h>
-#include <stdlib.h>
 #include <unistd.h>
+#include <errno.h>
+#include <stdio.h>
 #include "shr.h"
 
-/* this test is special. it doubles as a performance test.
-   this one does read and write with simultaneous contention and blocking */
-
-/* test message is 36*10 + 1 bytes. 361 bytes just for realism */
-char msg[]  =      "1234567890abcdefghijklmnopqrstuvwxyz"
-                   "!@#$%^&*()ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                   "1234567890abcdefghijklmnopqrstuvwxyz"
-                   "!@#$%^&*()ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                   "1234567890abcdefghijklmnopqrstuvwxyz"
-                   "!@#$%^&*()ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                   "1234567890abcdefghijklmnopqrstuvwxyz"
-                   "!@#$%^&*()ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                   "1234567890abcdefghijklmnopqrstuvwxyz"
-                   "!@#$%^&*()ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-
-int nmsg = 1000000;
-#define ring_sz (sizeof(msg) * nmsg)
-
-char *ring = __FILE__ ".ring";
-
-void delay() { usleep(1000000); }
-
-#define do_open   'o'
-#define do_close  'c'
-#define do_write  'w'
-#define do_read   'r'
-#define do_unlink 'u'
-#define do_select 's'
-#define do_get_fd 'g'
-#define do_empty  'e'
-#define do_fill   'f'
-
-void print_elapsed(char *name, struct timeval *start, struct timeval *end, int nmsg) {
-  unsigned long usec_start, usec_end, usec_elapsed;
-  usec_end = end->tv_sec * 1000000 + end->tv_usec;
-  usec_start = start->tv_sec * 1000000 + start->tv_usec;
-  usec_elapsed = usec_end - usec_start;
-  double msgs_per_sec = usec_elapsed  ? (nmsg * 1000000.0 / usec_elapsed) : 0;
-  fprintf(stderr,"%s: %f msgs/sec\n", name, msgs_per_sec);
-}
-
-void r(int fd) {
-  shr *s = NULL;
-  char op, c, buf[sizeof(msg)];
-  int rc, selectable_fd=-1, n;
-  struct timeval tv_start, tv_end;
-
-  printf("r: ready\n");
-
-  for(;;) {
-    rc = read(fd, &op, sizeof(op));
-    if (rc < 0) {
-      fprintf(stderr,"r read: %s\n", strerror(errno));
-      goto done;
-    }
-    if (rc == 0) {
-      printf("r: eof\n");
-      goto done;
-    }
-    assert(rc == sizeof(op));
-    switch(op) {
-      case do_open:
-        s = shr_open(ring, SHR_RDONLY|SHR_NONBLOCK);
-        if (s == NULL) goto done;
-        printf("r: open\n");
-        break;
-      case do_get_fd:
-        printf("r: get selectable fd\n");
-        selectable_fd = shr_get_selectable_fd(s);
-        if (selectable_fd < 0) goto done;
-        break;
-      case do_select:
-        //printf("r: select\n");
-        gettimeofday(&tv_start,NULL);
-        n = 0;
-        while (n < nmsg) {
-          fd_set fds;
-          FD_ZERO(&fds);
-          FD_SET(selectable_fd, &fds);
-          struct timeval tv = {.tv_sec = 1, .tv_usec =0};
-          rc = select(selectable_fd+1, &fds, NULL, NULL, &tv);
-          if (rc < 0) printf("r: select %s\n", strerror(errno));
-          else if (rc == 0) printf("r: timeout\n");
-          else if (rc == 1) {
-            //printf("r: ready. draining...\n");
-            do {
-              rc = shr_read(s, buf, sizeof(buf));
-              //printf("r: msg\n");
-              n++;
-            } while (rc > 0);
-          }
-          else assert(0);
-        }
-        gettimeofday(&tv_end,NULL);
-        print_elapsed("r", &tv_start,&tv_end,nmsg);
-        break;
-      case do_read:
-        do {
-          printf("r: read\n");
-          rc = shr_read(s, &c, sizeof(c)); // byte read
-          if (rc > 0) printf("r: [%c]\n", c);
-          if (rc == 0) printf("r: wouldblock\n");
-        } while (rc > 0);
-        break;
-      case do_empty:
-        // printf("r: empty\n");
-        gettimeofday(&tv_start,NULL);
-        for(n=0; n < nmsg; n++) {
-          rc = shr_read(s, buf, sizeof(buf));
-          //fprintf(stderr,"r\n");
-          if (rc != sizeof(buf)) printf("r: %d != %d\n", (int)rc, (int)sizeof(buf));
-        }
-        gettimeofday(&tv_end,NULL);
-        print_elapsed("r", &tv_start,&tv_end,nmsg);
-        break;
-      case do_close:
-        assert(s);
-        shr_close(s);
-        printf("r: close\n");
-        break;
-      default:
-        assert(0);
-        break;
-    }
-  }
- done:
-  exit(0);
-}
-
-void w(int fd) {
-  shr *s = NULL;
-  char op;
-  int rc, n;
-  struct timeval tv_start, tv_end;
-
-  printf("w: ready\n");
-
-  for(;;) {
-    rc = read(fd, &op, sizeof(op));
-    if (rc < 0) {
-      fprintf(stderr,"w read: %s\n", strerror(errno));
-      goto done;
-    }
-    if (rc == 0) {
-      printf("w: eof\n");
-      goto done;
-    }
-    assert(rc == sizeof(op));
-    switch(op) {
-      case do_open:
-        s = shr_open(ring, SHR_WRONLY);
-        if (s == NULL) goto done;
-        printf("w: open\n");
-        break;
-      case do_write:
-        printf("w: write\n");
-        rc = shr_write(s, msg, sizeof(msg));
-        if (rc != sizeof(msg)) printf("w: rc %d\n", rc);
-        break;
-      case do_fill:
-        gettimeofday(&tv_start,NULL);
-        // printf("w: fill\n");
-        for(n=0; n < nmsg; n++) {
-          rc = shr_write(s, msg, sizeof(msg));
-          //fprintf(stderr,"w\n");
-          if (rc != sizeof(msg)) printf("w: rc %d\n", rc);
-        }
-        gettimeofday(&tv_end,NULL);
-        print_elapsed("w", &tv_start,&tv_end,nmsg);
-        break;
-      case do_unlink:
-        printf("w: unlink\n");
-        unlink(ring);
-        break;
-      case do_close:
-        assert(s);
-        shr_close(s);
-        printf("w: close\n");
-        break;
-      default:
-        assert(0);
-        break;
-    }
-  }
- done:
-  exit(0);
-}
-
-#define issue(fd,op) do {                           \
-  char cmd = op;                                    \
-  if (write((fd), &cmd, sizeof(cmd)) < 0) {         \
-    fprintf(stderr,"write: %s\n", strerror(errno)); \
-    goto done;                                      \
-  }                                                 \
-} while(0)
+char *ring = "/dev/shm/" __FILE__ ".ring";
 
 int main() {
-  int rc = 0;
-  pid_t rpid,wpid;
+  setlinebuf(stdout);
+ int rc = -1, sc, signal_fd = -1;
+ struct shr *s=NULL;
+ unsigned int n;
+ char buf[100];
+ ssize_t nr;
 
-  setbuf(stdout,NULL);
-  unlink(ring);
+ unlink(ring);
 
-  int pipe_to_r[2];
-  int pipe_to_w[2];
+ printf("init\n");
+ if (shr_init(ring, sizeof(buf)+0, 0) < 0) goto done;
 
-  shr_init(ring, ring_sz, 0);
+ s = shr_open(ring, SHR_WRONLY);
+ if (s == NULL) goto done;
 
-  if (pipe(pipe_to_r) < 0) goto done;
+ /* signals that we'll accept via signalfd in epoll */
+ int sigs[] = {SIGHUP,SIGTERM,SIGINT,SIGQUIT,SIGALRM};
 
-  rpid = fork();
-  if (rpid < 0) goto done;
-  if (rpid == 0) { /* child */
-    close(pipe_to_r[1]);
-    r(pipe_to_r[0]);
-    assert(0); /* not reached */
-  }
+ /* block all signals. we take signals synchronously via signalfd */
+ sigset_t all;
+ sigfillset(&all);
+ sigprocmask(SIG_SETMASK,&all,NULL);
 
-  /* parent */
-  close(pipe_to_r[0]);
+ /* a few signals we'll accept via our signalfd */
+ sigset_t sw;
+ sigemptyset(&sw);
+ for(n=0; n < sizeof(sigs)/sizeof(*sigs); n++) sigaddset(&sw, sigs[n]);
 
-  delay();
+ /* create the signalfd for receiving signals */
+ signal_fd = signalfd(-1, &sw, 0);
+ if (signal_fd == -1) {
+   fprintf(stderr,"signalfd: %s\n", strerror(errno));
+   goto done;
+ }
 
-  if (pipe(pipe_to_w) < 0) goto done;
-  wpid = fork();
-  if (wpid < 0) goto done;
-  if (wpid == 0) { /* child */
-    close(pipe_to_r[1]);
-    close(pipe_to_w[1]);
-    w(pipe_to_w[0]);
-    assert(0); /* not reached */
-  }
-  /* parent */
-  close(pipe_to_w[0]);
+ /* tell shr to monitor this fd while blocked */
+ sc = shr_ctl(s, SHR_POLLFD, signal_fd);
+ if (sc < 0) goto done;
 
-  int R = pipe_to_r[1];
-  int W = pipe_to_w[1];
+ /* schedule SIGARLM for 10s from now */
+ alarm(10);
 
-  issue(W, do_open); delay();
+ /* initial write should succeed immediately */
+ memset(buf, 0, sizeof(buf));
+ nr = shr_write(s, buf, sizeof(buf));
+ printf("shr_write: %zd\n", nr);
 
-  issue(R, do_open);
-  issue(R, do_get_fd);
-  delay();
+ /* start a blocking write. signal should cause nr == -3 */
+ nr = shr_write(s, buf, sizeof(buf));
+ printf("shr_write: %zd\n", nr);
 
-  /* contention begins here */
-  issue(R, do_select);
-  issue(W, do_fill);
-
-  issue(W, do_close); delay();
-  close(W); delay();
-
-  issue(R, do_close); delay();
-
-  close(R);
-
-  waitpid(wpid,NULL,0);
-  waitpid(rpid,NULL,0);
-
+ printf("ok\n");
  rc = 0;
 
 done:
+ if (signal_fd) close(signal_fd);
+ if (s) shr_close(s);
  unlink(ring);
- printf("end\n");
  return rc;
 }

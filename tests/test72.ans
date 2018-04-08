@@ -1,0 +1,49 @@
+w: do_open
+r: do_open
+f: do_open
+w: do_write_20b
+w: wrote abcdefghijklmnopqrst
+w: do_write_20b
+w: wrote bcdefghijklmnopqrstu
+w: do_write_20b
+w: wrote cdefghijklmnopqrstuv
+w: do_stat
+stat: 0
+bw 60, br 0, mw 3, mr 0, md 2, bd 40, bn 20, bu 20, mu 1
+r: do_read_one
+cdefghijklmnopqrstuv
+w: do_write_20b
+w: wrote defghijklmnopqrstuvw
+w: do_write_one
+w: wrote seq e
+w: do_stat
+stat: 0
+bw 81, br 20, mw 5, mr 1, md 4, bd 80, bn 20, bu 1, mu 1
+r: do_read_one
+e
+w: do_write_20b
+w: wrote fghijklmnopqrstuvwxy
+r: do_read_one
+fghijklmnopqrstuvwxy
+w: do_write_one
+w: wrote seq g
+r: do_read_one
+g
+w: do_write_one
+w: wrote seq h
+f: do_read_one
+g
+w: do_write_20b
+w: wrote ijklmnopqrstuvwxyz{|
+f: do_read_one
+ijklmnopqrstuvwxyz{|
+w: do_close
+f: do_close
+r: do_close
+w: do_exit
+w: exiting
+f: do_exit
+f: exiting
+r: do_exit
+r: exiting
+end

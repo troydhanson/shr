@@ -1,0 +1,7 @@
+w: do_open
+w: do_close
+w: do_exit
+w: exiting
+r: do_exit
+r: exiting
+end

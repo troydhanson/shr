@@ -1,0 +1,18 @@
+w: do_open
+f: do_open
+r: do_open
+f: do_read_one
+r: do_read_one
+w: do_fill
+0
+0
+w: do_close
+f: do_close
+r: do_close
+w: do_exit
+w: exiting
+f: do_exit
+f: exiting
+r: do_exit
+r: exiting
+end

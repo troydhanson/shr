@@ -1,14 +1,89 @@
-r: ready
-w: ready
-1000000 msgs total 361000000 bytes
-writing
-w: open
-w: fill
-w: close
-w: eof
-reading
-r: open
-r: empty
-r: close
-r: eof
+w: do_open
+r: do_open
+w: do_write_one_3b
+w: wrote seq aaa
+w: do_write_one
+w: wrote seq b
+w: do_write_one_3b
+w: wrote seq ccc
+w: do_write_one_4b
+w: wrote seq dddd
+w: do_write_one_4b
+w: wrote seq eeee
+w: do_write_one_4b
+w: wrote seq ffff
+w: do_write_one_4b
+w: wrote seq gggg
+w: do_write_one_4b
+w: wrote seq hhhh
+w: do_write_one_4b
+w: wrote seq iiii
+w: do_write_one_2b
+w: wrote seq jj
+r: do_stat
+w: stat: 0
+w: bw 33, br 0, mw 10, mr 0, md 0, bd 0, bn 34, bu 33, mu 10
+w: do_write_one_4b
+w: wrote seq kkkk
+r: do_stat
+w: stat: 0
+w: bw 37, br 0, mw 11, mr 0, md 1, bd 3, bn 34, bu 34, mu 10
+r: do_read_one
+b
+r: do_read_one
+ccc
+f: do_open
+f: do_read_one
+b
+f: do_read_one
+ccc
+w: do_write_one_4b
+w: wrote seq llll
+w: do_write_one_4b
+w: wrote seq mmmm
+w: do_write_one_4b
+w: wrote seq nnnn
+w: do_write_one_4b
+w: wrote seq oooo
+w: do_write_one_4b
+w: wrote seq pppp
+w: do_write_one_4b
+w: wrote seq qqqq
+w: do_write_one_4b
+w: wrote seq rrrr
+w: do_write_one_4b
+w: wrote seq ssss
+w: do_write_one_4b
+w: wrote seq tttt
+w: do_write_one_4b
+w: wrote seq uuuu
+r: do_read_one
+nnnn
+f: do_read_one
+nnnn
+f: do_read_one
+oooo
+f: do_read_one
+pppp
+f: do_read_one
+qqqq
+f: do_read_one
+rrrr
+f: do_read_one
+ssss
+f: do_read_one
+tttt
+f: do_read_one
+uuuu
+f: do_read_one
+shr_read: no data
+w: do_close
+f: do_close
+r: do_close
+w: do_exit
+w: exiting
+f: do_exit
+f: exiting
+r: do_exit
+r: exiting
 end

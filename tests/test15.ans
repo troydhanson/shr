@@ -1,12 +1,4 @@
-r: ready
-w: ready
-r: open
-w: open
-r: read
-w: write
-r: [squirrel]
-w: close
-r: close
-w: eof
-r: eof
-end
+ring size: 5, bytes: 0, messages: 0
+cache size: 5, bytes: 5, messages: 1
+ring size: 5, bytes: 5, messages: 1
+cache size: 5, bytes: 5, messages: 1

@@ -1,265 +1,281 @@
-#include <stdio.h>
-#include <string.h>
 #include <sys/wait.h>
+#include <inttypes.h>
 #include <sys/time.h>
+#include <string.h>
 #include <assert.h>
-#include <errno.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <stdio.h>
+#include <errno.h>
+#include <time.h>
 #include "shr.h"
 
-/* this test is special. it doubles as a performance test.
-   this one does read and write with simultaneous contention and blocking */
+#define W 0
+#define R 1
+#define F 2
 
-/* test message is 36*10 + 1 bytes. 361 bytes just for realism */
-char msg[]  =      "1234567890abcdefghijklmnopqrstuvwxyz"
-                   "!@#$%^&*()ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                   "1234567890abcdefghijklmnopqrstuvwxyz"
-                   "!@#$%^&*()ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                   "1234567890abcdefghijklmnopqrstuvwxyz"
-                   "!@#$%^&*()ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                   "1234567890abcdefghijklmnopqrstuvwxyz"
-                   "!@#$%^&*()ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                   "1234567890abcdefghijklmnopqrstuvwxyz"
-                   "!@#$%^&*()ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+char *ring = "/dev/shm/" __FILE__ ".ring";
 
-int nmsg = 1000000;
-#define ring_sz ((sizeof(msg) + sizeof(size_t)) * nmsg)
+/* make an enum and a char*[] for the ops */
+#define adim(x) (sizeof(x)/sizeof(*x))
+#define OPS o(do_none) o(do_open) o(do_fill) o(do_read_half) o(do_read_one) \
+ o(do_write_one) o(do_write_one_2b) o(do_write_one_3b) o(do_write_one_4b) o(do_write_one_5b) o(do_stat) o(do_farm_stat) o(do_close) o(do_exit)
+#define o(x) #x,
+char *op_s[] = { OPS };
+#undef o
+#define o(x) x,
+typedef enum { OPS } ops;
 
-char *ring = __FILE__ ".ring";
+#define NMSG 100
+char msg[] = "000000000000000000000000000000000000";
+const int ring_sz = 20;
+struct iovec iov[NMSG];
+char msg_all[sizeof(msg)*NMSG];
 
-void delay() { usleep(50000); }
+struct {
+  char *prog;
+  time_t start;
+  int verbose;
+  int speed;
+  int unlink;
+} CF = {
+  .speed = 1,
+  .unlink = 1,
+};
 
-#define do_open   'o'
-#define do_close  'c'
-#define do_write  'w'
-#define do_read   'r'
-#define do_unlink 'u'
-#define do_select 's'
-#define do_get_fd 'g'
-#define do_empty  'e'
-#define do_fill   'f'
+/* the event sequence we want executed */
+struct events {
+  int who;
+  ops op;
+} ev[] = {
+    { W, do_open},
+    { R, do_open},
 
-void print_elapsed(char *name, struct timeval *start, struct timeval *end, int nmsg) {
-  unsigned long usec_start, usec_end, usec_elapsed;
-  usec_end = end->tv_sec * 1000000 + end->tv_usec;
-  usec_start = start->tv_sec * 1000000 + start->tv_usec;
-  usec_elapsed = usec_end - usec_start;
-  double msgs_per_sec = usec_elapsed  ? (nmsg * 1000000.0 / usec_elapsed) : 0;
-  fprintf(stderr,"%s: %f msgs/sec\n", name, msgs_per_sec);
+    { W, do_write_one_5b},  /* write AAAAA */
+    { W, do_write_one_3b},  /* write BBB */
+    { W, do_write_one},     /* write C */
+    { W, do_write_one_3b},  /* write DDD */
+    { W, do_write_one},     /* write E */
+    { W, do_write_one_5b},  /* write FFFFF */
+    { W, do_write_one},     /* write G */
+    { W, do_write_one},     /* write H */
+
+    /* mv NOT filled but ring filled */
+
+    { R, do_stat},          /* mu 8 */
+    { R, do_read_one},      /* read AAAAA */
+
+    { W, do_write_one_5b},  /* write IIIII, overwrite AAAAA */
+    { R, do_read_one},      /* read BBB */
+    { R, do_read_one},      /* read C */
+
+    /* NOT a farm */
+    { F, do_open},
+    { F, do_stat},          /* mu 6 */
+    { F, do_read_one},      /* read DDD */
+    { F, do_read_one},      /* read E */
+
+    { W, do_write_one_5b},  /* write JJJJJ, overwrites BBB, C, DDD  */
+
+    { R, do_read_one},      /* read FFFFF */
+    { F, do_read_one},      /* read G */
+
+    { W, do_close},
+    { F, do_close},
+    { R, do_close},
+
+    { W, do_exit},
+    { F, do_exit},
+    { R, do_exit},
+};
+
+/* sleep til X seconds since start */
+void sleep_til( int el ) {
+  time_t now;
+  time(&now);
+
+  if (now > CF.start + el) {
+    fprintf(stderr, "sleep_til: already elapsed\n");
+    return;
+  }
+
+  sleep((CF.start + el) - now);
 }
 
-void r(int fd) {
-  shr *s = NULL;
-  char op, c, buf[sizeof(msg)];
-  int rc, selectable_fd=-1, n;
-  struct timeval tv_start, tv_end;
+/* run the event sequence 
+ * runs in child process. never returns 
+ */
+void execute(int me) {
+  char msg_one[sizeof(msg)];
+  struct shr *s = NULL;
+  unsigned seq = 'a';
+  unsigned i, n;
+  ssize_t nr;
+  size_t d;
+  int sc;
+  struct shr_stat stat;
 
-  printf("r: ready\n");
+  for(i=0; i < adim(ev); i++) {
 
-  for(;;) {
-    rc = read(fd, &op, sizeof(op));
-    if (rc < 0) {
-      fprintf(stderr,"r read: %s\n", strerror(errno));
-      goto done;
-    }
-    if (rc == 0) {
-      printf("r: eof\n");
-      goto done;
-    }
-    assert(rc == sizeof(op));
-    switch(op) {
+    if ( ev[i].who != me ) continue;
+
+    sleep_til( i * CF.speed );
+    if (me == R) printf("r: ");
+    if (me == F) printf("f: ");
+    if (me == W) printf("w: ");
+    printf("%s\n", op_s[ ev[i].op ]);
+
+    switch( ev[i].op ) {
       case do_open:
-        s = shr_open(ring, SHR_RDONLY);
+        s = shr_open(ring, 
+          ((me == R) || (me == F))    ?
+          (SHR_RDONLY | SHR_NONBLOCK) : 
+          SHR_WRONLY);
         if (s == NULL) goto done;
-        printf("r: open\n");
-        break;
-      case do_get_fd:
-        printf("r: get selectable fd\n");
-        selectable_fd = shr_get_selectable_fd(s);
-        if (selectable_fd < 0) goto done;
-        break;
-      case do_select:
-        printf("r: select\n");
-        fd_set fds;
-        FD_ZERO(&fds);
-        FD_SET(selectable_fd, &fds);
-        struct timeval tv = {.tv_sec = 1, .tv_usec =0};
-        rc = select(selectable_fd+1, &fds, NULL, NULL, &tv);
-        if (rc < 0) printf("r: select %s\n", strerror(errno));
-        else if (rc == 0) printf("r: timeout\n");
-        else if (rc == 1) printf("r: ready\n");
-        else assert(0);
-        break;
-      case do_read:
-        do {
-          printf("r: read\n");
-          rc = shr_read(s, &c, sizeof(c)); // byte read
-          if (rc > 0) printf("r: [%c]\n", c);
-          if (rc == 0) printf("r: wouldblock\n");
-        } while (rc > 0);
-        break;
-      case do_empty:
-        // printf("r: empty\n");
-        gettimeofday(&tv_start,NULL);
-        for(n=0; n < nmsg; n++) {
-          rc = shr_read(s, buf, sizeof(buf));
-          //fprintf(stderr,"r\n");
-          if (rc != sizeof(buf)) printf("r: %d != %d\n", (int)rc, (int)sizeof(buf));
-        }
-        gettimeofday(&tv_end,NULL);
-        print_elapsed("r", &tv_start,&tv_end,nmsg);
         break;
       case do_close:
-        assert(s);
         shr_close(s);
-        printf("r: close\n");
         break;
-      default:
-        assert(0);
+      case do_exit:
+        goto done;
         break;
-    }
-  }
- done:
-  exit(0);
-}
-
-void w(int fd) {
-  shr *s = NULL;
-  char op;
-  int rc, n;
-  struct timeval tv_start, tv_end;
-  struct iovec io[10];
-
-  printf("w: ready\n");
-
-  for(;;) {
-    rc = read(fd, &op, sizeof(op));
-    if (rc < 0) {
-      fprintf(stderr,"w read: %s\n", strerror(errno));
-      goto done;
-    }
-    if (rc == 0) {
-      printf("w: eof\n");
-      goto done;
-    }
-    assert(rc == sizeof(op));
-    switch(op) {
-      case do_open:
-        s = shr_open(ring, SHR_WRONLY);
-        if (s == NULL) goto done;
-        printf("w: open\n");
+      case do_stat:
+        sc = shr_stat(s, &stat, NULL);
+        printf("stat: %d\n", sc);
+        printf("bw %ld, br %ld, mw %ld, mr %ld, md %ld, bd %ld, bn %ld, bu %ld, mu %ld\n",
+              stat.bw, stat.br, stat.mw, stat.mr, stat.md, stat.bd, stat.bn, stat.bu, stat.mu);
         break;
-      case do_write:
-        printf("w: write\n");
-        rc = shr_write(s, msg, sizeof(msg));
-        if (rc != sizeof(msg)) printf("w: rc %d\n", rc);
+      case do_farm_stat:
+        d = shr_farm_stat(s, 0);
+        printf("drops: %zu\n", d);
+        break;
+      case do_read_one:
+        nr = shr_read(s, msg_one, sizeof(msg_one));
+        if (nr <= 0) 
+          printf("shr_read: %s\n", nr ? "error" : "no data");
+        else
+          printf("%.*s\n", (int)nr, msg_one);
+        break;
+      case do_read_half:
+        for(n=0; n < NMSG/2; n++) {
+          nr = shr_read(s, msg_one, sizeof(msg_one));
+          if (nr != sizeof(msg)) {
+            printf("shr_read: %d\n", (int)nr);
+            break;
+          }
+          printf("%s\n", msg_one);
+        }
+        break;
+      case do_write_one:
+        msg_one[0] = seq;
+        nr = shr_write(s, msg_one, 1);
+        printf("w: wrote seq %c\n", seq);
+        seq++;
+        break;
+      case do_write_one_2b:
+        msg_one[0] = seq;
+        msg_one[1] = seq;
+        nr = shr_write(s, msg_one, 2);
+        printf("w: wrote seq %c%c\n", seq, seq);
+        seq++;
+        break;
+      case do_write_one_3b:
+        msg_one[0] = seq;
+        msg_one[1] = seq;
+        msg_one[2] = seq;
+        nr = shr_write(s, msg_one, 3);
+        printf("w: wrote seq %c%c%c\n", seq, seq, seq);
+        seq++;
+        break;
+      case do_write_one_5b:
+        msg_one[0] = seq;
+        msg_one[1] = seq;
+        msg_one[2] = seq;
+        msg_one[3] = seq;
+        msg_one[4] = seq;
+        nr = shr_write(s, msg_one, 5);
+        printf("w: wrote seq %c%c%c%c%c\n", seq, seq, seq, seq, seq);
+        seq++;
+        break;
+      case do_write_one_4b:
+        msg_one[0] = seq;
+        msg_one[1] = seq;
+        msg_one[2] = seq;
+        msg_one[3] = seq;
+        nr = shr_write(s, msg_one, 4);
+        printf("w: wrote seq %c%c%c%c\n", seq, seq, seq, seq);
+        seq++;
         break;
       case do_fill:
-        for(n=0; n < 10; n++) {
-          io[n].iov_base = msg;
-          io[n].iov_len = sizeof(msg);
+        for(n=0; n < NMSG; n++) {
+          snprintf(msg_one, sizeof(msg_one), "%u", seq++);
+          nr = shr_write(s, msg_one, sizeof(msg_one));
         }
-        gettimeofday(&tv_start,NULL);
-        // printf("w: fill\n");
-        for(n=0; n < nmsg; n+=10) {
-          rc = shr_writev(s, io, 10);
-          //fprintf(stderr,"w\n");
-          if (rc != (int)(10*sizeof(msg))) printf("w: rc %d\n", rc);
-        }
-        gettimeofday(&tv_end,NULL);
-        print_elapsed("w", &tv_start,&tv_end,nmsg);
-        break;
-      case do_unlink:
-        printf("w: unlink\n");
-        unlink(ring);
-        break;
-      case do_close:
-        assert(s);
-        shr_close(s);
-        printf("w: close\n");
+        printf("w: wrote %d messages (to seq %u)\n", NMSG, seq);
         break;
       default:
+        fprintf(stderr,"op not implemented\n");
         assert(0);
         break;
     }
   }
+
  done:
+  if (me == R) printf("r: ");
+  if (me == F) printf("f: ");
+  if (me == W) printf("w: ");
+  printf("exiting\n");
   exit(0);
 }
 
-#define issue(fd,op) do {                           \
-  char cmd = op;                                    \
-  if (write((fd), &cmd, sizeof(cmd)) < 0) {         \
-    fprintf(stderr,"write: %s\n", strerror(errno)); \
-    goto done;                                      \
-  }                                                 \
-} while(0)
+void usage() {
+  fprintf(stderr,"usage: %s [-v] [-s <slowdown>]\n", CF.prog);
+  fprintf(stderr,"-v verbose\n");
+  fprintf(stderr,"-s <slowdown> (factor to slow test [def: 1])\n");
+  fprintf(stderr,"-u            (don't unlink ring after test)\n");
+  exit(-1);
+}
 
-int main() {
-  int rc = 0;
-  pid_t rpid,wpid;
+int main(int argc, char *argv[]) {
+  setlinebuf(stdout);
+  int rc = -1, opt;
+  pid_t rpid,wpid,fpid;
 
-  setbuf(stdout,NULL);
+  while ( (opt = getopt(argc,argv,"vhs:u")) > 0) {
+    switch(opt) {
+      case 'v': CF.verbose++; break;
+      case 's': CF.speed = atoi(optarg); break;
+      case 'u': CF.unlink = 0; break;
+      case 'h': default: usage(); break;
+    }
+  }
+
+  time(&CF.start);
   unlink(ring);
-
-  int pipe_to_r[2];
-  int pipe_to_w[2];
-
-  shr_init(ring, ring_sz, SHR_MESSAGES);
-
-  if (pipe(pipe_to_r) < 0) goto done;
+  shr_init(ring, ring_sz, SHR_DROP|SHR_MAXMSGS_2, NMSG);
 
   rpid = fork();
   if (rpid < 0) goto done;
-  if (rpid == 0) { /* child */
-    close(pipe_to_r[1]);
-    r(pipe_to_r[0]);
-    assert(0); /* not reached */
-  }
+  if (rpid == 0) execute(R);
+  assert(rpid > 0);
 
-  /* parent */
-  close(pipe_to_r[0]);
-
-  delay();
-
-  if (pipe(pipe_to_w) < 0) goto done;
   wpid = fork();
   if (wpid < 0) goto done;
-  if (wpid == 0) { /* child */
-    close(pipe_to_r[1]);
-    close(pipe_to_w[1]);
-    w(pipe_to_w[0]);
-    assert(0); /* not reached */
-  }
-  /* parent */
-  close(pipe_to_w[0]);
+  if (wpid == 0) execute(W);
+  assert(wpid > 0);
 
-  int R = pipe_to_r[1];
-  int W = pipe_to_w[1];
-
-  issue(W, do_open); delay();
-  issue(R, do_open); delay();
-
-
-  /* contention begins here */
-
-  issue(W, do_fill);
-  issue(R, do_empty);
-
-  issue(W, do_close); delay();
-  issue(R, do_close); delay();
-
-  close(W); delay();
-  close(R);
+  fpid = fork();
+  if (fpid < 0) goto done;
+  if (fpid == 0) execute(F);
+  assert(fpid > 0);
 
   waitpid(wpid,NULL,0);
   waitpid(rpid,NULL,0);
-
- rc = 0;
+  waitpid(fpid,NULL,0);
 
 done:
- unlink(ring);
- printf("end\n");
- return rc;
+  if (CF.unlink) unlink(ring);
+  printf("end\n");
+  return rc;
 }
+

@@ -1,215 +1,244 @@
-#include <stdio.h>
 #include <sys/wait.h>
+#include <inttypes.h>
+#include <sys/time.h>
 #include <string.h>
 #include <assert.h>
-#include <errno.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <stdio.h>
+#include <errno.h>
+#include <time.h>
 #include "shr.h"
 
-char *ring = __FILE__ ".ring";
+#define W 0
+#define R 1
+#define F 2
 
-#define do_open   'o'
-#define do_close  'c'
-#define do_write  'w'
-#define do_read   'r'
-#define do_unlink 'u'
-#define do_select 's'
-#define do_get_fd 'g'
+char *ring = "/dev/shm/" __FILE__ ".ring";
 
-void r(int fd) {
-  shr *s = NULL;
-  char op, c;
-  int rc, selectable_fd=-1;
+/* make an enum and a char*[] for the ops */
+#define adim(x) (sizeof(x)/sizeof(*x))
+#define OPS o(do_none) o(do_open) o(do_write_one) o(do_flush_wait) \
+   o(do_flush_nb) o(do_fill) o(do_fillv) o(do_stat) o(do_read_one) \
+   o(do_read_all) o(do_close) o(do_exit)
+#define o(x) #x,
+char *op_s[] = { OPS };
+#undef o
+#define o(x) x,
+typedef enum { OPS } ops;
 
-  printf("r: ready\n");
+#define NMSG 1000
+char msg[] = "000000000000000000000000000000000000";
+const int ring_sz = (sizeof(msg)+0)*NMSG;
+struct iovec iov[NMSG];
+char msg_all[sizeof(msg)*NMSG];
 
-  for(;;) {
-    rc = read(fd, &op, sizeof(op));
-    if (rc < 0) {
-      fprintf(stderr,"r read: %s\n", strerror(errno));
-      goto done;
-    }
-    if (rc == 0) {
-      printf("r: eof\n");
-      goto done;
-    }
-    assert(rc == sizeof(op));
-    switch(op) {
+struct {
+  char *prog;
+  time_t start;
+  int verbose;
+  int speed;
+  int unlink;
+} CF = {
+  .speed = 1,
+  .unlink = 1,
+};
+
+/* the event sequence we want executed */
+struct events {
+  int who;
+  ops op;
+} ev[] = {
+    { W, do_open},
+    { F, do_open},
+    { R, do_open},
+
+    { W, do_fillv}, /* too much for cache; straight to ring */
+    { W, do_stat},
+
+    { W, do_write_one}, /* seq 0 to cache */
+    { W, do_stat},
+    { W, do_flush_wait},
+
+    { R, do_read_all},
+    { R, do_read_one},
+
+    { W, do_close},
+    { F, do_close},
+    { R, do_close},
+
+    { W, do_exit},
+    { F, do_exit},
+    { R, do_exit},
+};
+
+/* sleep til X seconds since start */
+void sleep_til( int el ) {
+  time_t now;
+  time(&now);
+
+  if (now > CF.start + el) {
+    fprintf(stderr, "sleep_til: already elapsed\n");
+    return;
+  }
+
+  sleep((CF.start + el) - now);
+}
+
+/* run the event sequence 
+ * runs in child process. never returns 
+ */
+void execute(int me) {
+  char msg_one[sizeof(msg)];
+  struct shr *s = NULL;
+  unsigned i, seq = 0;
+  struct shr_stat st;
+  ssize_t nr;
+  int sc, n;
+  struct iovec iov[NMSG];
+
+  for(i=0; i < adim(ev); i++) {
+
+    if ( ev[i].who != me ) continue;
+
+    sleep_til( i * CF.speed );
+    if (me == R) printf("r: ");
+    if (me == F) printf("f: ");
+    if (me == W) printf("w: ");
+    printf("%s\n", op_s[ ev[i].op ]);
+
+    switch( ev[i].op ) {
       case do_open:
-        s = shr_open(ring, SHR_RDONLY|SHR_NONBLOCK);
+        s = shr_open(ring, ((me == R) || (me == F)) ? 
+                (SHR_RDONLY | SHR_NONBLOCK) : 
+                (SHR_WRONLY | SHR_BUFFERED | SHR_NONBLOCK) );
         if (s == NULL) goto done;
-        printf("r: open\n");
-        break;
-      case do_get_fd:
-        printf("r: get selectable fd\n");
-        selectable_fd = shr_get_selectable_fd(s);
-        if (selectable_fd < 0) goto done;
-        break;
-      case do_select:
-        printf("r: select\n");
-        fd_set fds;
-        FD_ZERO(&fds);
-        FD_SET(selectable_fd, &fds);
-        struct timeval tv = {.tv_sec = 1, .tv_usec =0};
-        rc = select(selectable_fd+1, &fds, NULL, NULL, &tv);
-        if (rc < 0) printf("r: select %s\n", strerror(errno));
-        else if (rc == 0) printf("r: timeout\n");
-        else if (rc == 1) printf("r: ready\n");
-        else assert(0);
-        break;
-      case do_read:
-        do {
-          printf("r: read\n");
-          rc = shr_read(s, &c, sizeof(c)); // byte read
-          if (rc > 0) printf("r: [%c]\n", c);
-          if (rc == 0) printf("r: wouldblock\n");
-        } while (rc > 0);
         break;
       case do_close:
-        assert(s);
         shr_close(s);
-        printf("r: close\n");
+        break;
+      case do_flush_wait:
+        nr = shr_flush(s, 1);
+        if (nr < 0) printf("shr_flush: %zd\n", nr);
+        break;
+      case do_flush_nb:
+        nr = shr_flush(s, 0);
+        if (nr <= 0) printf("shr_flush: %zd\n", nr);
+        break;
+      case do_exit:
+        goto done;
+        break;
+      case do_read_one:
+        nr = shr_read(s, msg_one, sizeof(msg_one));
+        if (nr != sizeof(msg)) {
+          printf("shr_read: %d\n", (int)nr);
+          break;
+        }
+        printf("%s\n", msg_one);
+        break;
+      case do_read_all:
+        for(n = 0; n < NMSG; n++) {
+          nr = shr_read(s, msg_one, sizeof(msg_one));
+          if (nr != sizeof(msg)) {
+            printf("shr_read: %d\n", (int)nr);
+            break;
+          }
+          printf("%.*s\n", (int)nr, msg_one);
+        }
+        printf("%s\n", msg_one);
+        break;
+      case do_stat:
+        memset(&st, 0, sizeof(st));
+        sc = shr_stat(s, &st, NULL);
+        if (sc < 0) printf("shr_stat: error\n");
+        printf("ring size: %zu, bytes: %zu, messages: %zu\n", st.bn, st.bu, st.mu);
+        printf("cache size: %zu, bytes: %zu, messages: %zu\n", st.cn, st.cb, st.cm);
+        break;
+      case do_fillv:
+        msg_one[0] = '*';
+        msg_one[1] = '\0';
+        for(n = 0; n < NMSG; n++) {
+          iov[n].iov_base = msg_one;
+          iov[n].iov_len  = sizeof(msg_one);
+        }
+        nr = shr_writev(s, iov, NMSG);
+        printf("w: %zd; wrote %d messages\n", nr, NMSG);
+        break;
+      case do_fill:
+        for(n = 0; n < NMSG; n++) {
+          snprintf(msg_one, sizeof(msg_one), "%u", seq++);
+          nr = shr_write(s, msg_one, sizeof(msg_one));
+        }
+        printf("w: wrote %d messages (to seq %u)\n", NMSG, seq);
+        break;
+      case do_write_one:
+        snprintf(msg_one, sizeof(msg_one), "%u", seq++);
+        nr = shr_write(s, msg_one, sizeof(msg_one));
+        printf("w: %zd; wrote 1 messages (to seq %u)\n", nr, seq);
         break;
       default:
+        fprintf(stderr,"op not implemented\n");
         assert(0);
         break;
     }
   }
+
  done:
+  if (me == R) printf("r: ");
+  if (me == F) printf("f: ");
+  if (me == W) printf("w: ");
+  printf("exiting\n");
   exit(0);
 }
 
-void w(int fd) {
-  shr *s = NULL;
-  char op, msg[] = "squirrel";
-  int rc;
+void usage() {
+  fprintf(stderr,"usage: %s [-v] [-s <slowdown>]\n", CF.prog);
+  fprintf(stderr,"-v verbose\n");
+  fprintf(stderr,"-s <slowdown> (factor to slow test [def: 1])\n");
+  fprintf(stderr,"-u            (don't unlink ring after test)\n");
+  exit(-1);
+}
 
-  printf("w: ready\n");
+int main(int argc, char *argv[]) {
+  setlinebuf(stdout);
+  int rc = -1, opt;
+  pid_t rpid,wpid,fpid;
 
-  for(;;) {
-    rc = read(fd, &op, sizeof(op));
-    if (rc < 0) {
-      fprintf(stderr,"w read: %s\n", strerror(errno));
-      goto done;
-    }
-    if (rc == 0) {
-      printf("w: eof\n");
-      goto done;
-    }
-    assert(rc == sizeof(op));
-    switch(op) {
-      case do_open:
-        s = shr_open(ring, SHR_WRONLY);
-        if (s == NULL) goto done;
-        printf("w: open\n");
-        break;
-      case do_write:
-        printf("w: write\n");
-        rc = shr_write(s, msg, sizeof(msg));
-        /* if (rc != sizeof(msg)) printf("w: rc %d\n", rc); */
-        break;
-      case do_unlink:
-        printf("w: unlink\n");
-        unlink(ring);
-        break;
-      case do_close:
-        assert(s);
-        shr_close(s);
-        printf("w: close\n");
-        break;
-      default:
-        assert(0);
-        break;
+  while ( (opt = getopt(argc,argv,"vhs:u")) > 0) {
+    switch(opt) {
+      case 'v': CF.verbose++; break;
+      case 's': CF.speed = atoi(optarg); break;
+      case 'u': CF.unlink = 0; break;
+      case 'h': default: usage(); break;
     }
   }
- done:
-  exit(0);
-}
 
-void delay() { usleep(50000); }
-
-#define issue(fd,op) do {                           \
-  char cmd = op;                                    \
-  if (write((fd), &cmd, sizeof(cmd)) < 0) {         \
-    fprintf(stderr,"write: %s\n", strerror(errno)); \
-    goto done;                                      \
-  }                                                 \
-  delay();                                          \
-} while(0)
-
-int main() {
-  int rc = 0;
-  pid_t rpid,wpid;
-
-  setbuf(stdout,NULL);
+  time(&CF.start);
   unlink(ring);
-
-  int pipe_to_r[2];
-  int pipe_to_w[2];
-
-  shr_init(ring, 10, 0);
-
-  if (pipe(pipe_to_r) < 0) goto done;
+  shr_init(ring, ring_sz, SHR_MAXMSGS_2, NMSG);
 
   rpid = fork();
   if (rpid < 0) goto done;
-  if (rpid == 0) { /* child */
-    close(pipe_to_r[1]);
-    r(pipe_to_r[0]);
-    assert(0); /* not reached */
-  }
+  if (rpid == 0) execute(R);
+  assert(rpid > 0);
 
-  /* parent */
-  close(pipe_to_r[0]);
-
-  delay();
-
-  if (pipe(pipe_to_w) < 0) goto done;
   wpid = fork();
   if (wpid < 0) goto done;
-  if (wpid == 0) { /* child */
-    close(pipe_to_r[1]);
-    close(pipe_to_w[1]);
-    w(pipe_to_w[0]);
-    assert(0); /* not reached */
-  }
-  /* parent */
-  close(pipe_to_w[0]);
+  if (wpid == 0) execute(W);
+  assert(wpid > 0);
 
-  int R = pipe_to_r[1];
-  int W = pipe_to_w[1];
+  fpid = fork();
+  if (fpid < 0) goto done;
+  if (fpid == 0) execute(F);
+  assert(fpid > 0);
 
-  delay();
-
-  /* this test exercises the initial-readability logic
-   * for a ring that already has data in it before the
-   * reader opens it */
-
-  /* writer put data in ring before reader open */
-  issue(W, do_open);
-  issue(W, do_write);
-
-  /* reader should find fd already readable */
-  issue(R, do_open);
-  issue(R, do_get_fd);
-  issue(R, do_select);
-  issue(R, do_read);
-
-  issue(W, do_unlink);
-  issue(W, do_close);
-  issue(R, do_close);
-
-  close(W); delay();
-  close(R); delay();
-
-  waitpid(rpid,NULL,0);
   waitpid(wpid,NULL,0);
-
- rc = 0;
+  waitpid(rpid,NULL,0);
+  waitpid(fpid,NULL,0);
 
 done:
- unlink(ring);
- printf("end\n");
- return rc;
+  if (CF.unlink) unlink(ring);
+  printf("end\n");
+  return rc;
 }
+

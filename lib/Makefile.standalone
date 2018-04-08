@@ -1,0 +1,14 @@
+all: bw.o ux.o bw-tool
+
+CFLAGS=-Wall -Wextra -g
+
+bw.o ux.o: %.o:%.c
+	$(CC) $(CFLAGS) -c $<
+	
+bw-tool: %:%.o
+	$(CC) $(CFLAGS) -o $@ $< bw.o ux.o
+
+.PHONY: clean
+
+clean:
+	rm -f *.o bw-tool

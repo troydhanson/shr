@@ -13,9 +13,9 @@
 char msg[]  = "abcdef";
 
 int nmsg = 2;
-#define ring_sz (((sizeof(msg) + sizeof(size_t)) * nmsg) + 1)
+#define ring_sz (((sizeof(msg) + 0) * nmsg) + 1)
 
-char *ring = __FILE__ ".ring";
+char *ring = "/dev/shm/" __FILE__ ".ring";
 
 void delay() { usleep(50000); }
 
@@ -210,6 +210,7 @@ void w(int fd) {
 } while(0)
 
 int main() {
+  setlinebuf(stdout);
   int rc = 0;
   pid_t rpid,wpid;
   assert(sizeof(size_t) == 8); // this TEST only (shr does not make this assumption)
@@ -220,7 +221,7 @@ int main() {
   int pipe_to_r[2];
   int pipe_to_w[2];
 
-  shr_init(ring, ring_sz, SHR_MESSAGES|SHR_DROP);
+  shr_init(ring, ring_sz, SHR_DROP);
 
   if (pipe(pipe_to_r) < 0) goto done;
 

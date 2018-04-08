@@ -1,12 +1,4 @@
-r: ready
-w: ready
-r: open
-w: open
-w: write
-r: read
-r: [squirrel]
-w: close
-r: close
-w: eof
-r: eof
-end
+app_data: now 10
+app_data: was 10
+app_data: now 20
+app_data: now 20

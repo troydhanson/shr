@@ -1,34 +1,40 @@
-PROGS=test1 test2 test3 test4 test5 test6 test7 test8 test9 test10 test11 test12 \
-      test13 test14 test15 test16 test17 test18 test19 test20 test21 test22 test23 \
-      test24 test25 test26 test27 test28 test29 test30 test31 test32 test33 test34 \
-      test35 test36 test37 test38 test39 test40 test41 test42 test43 test44 test45 \
-      test46 test47 test48 test49 test50 test51 test52 test53 test54 test55 test56 \
-      test57 test58 test59 test60 test61 test62
-OBJS=$(patsubst %,%.o,$(PROGS))
+SRCS=$(wildcard test*.c)
+PROGS=$(patsubst %.c,%,  $(SRCS))
+OBJS =$(patsubst %.c,%.o,$(SRCS))
 
-CFLAGS = -I../src
-CFLAGS += -g -O0
+CFLAGS = -I../src -I../lib
 CFLAGS += -Wall -Wextra
-LDFLAGS=
+#CFLAGS += -g -O0
+CFLAGS += -O2
 
-TEST_TARGET=run_tests
-TESTS=./do_tests
+STATIC_OBJS=shr.o bw.o ux.o
 
-all: $(OBJS) $(PROGS) $(TEST_TARGET) 
+all: $(STATIC_OBJS) $(PROGS) tests
+
+# rather than using libtool which turns our 
+# tests into shell scripts, to dynamically
+# link the pre-installed ../src/libshr.so,
+# this Makefile builds the ../src/ objects
+# itself and links them right in statically
+$(STATIC_OBJS):
+	$(CC) -c $(CFLAGS) ../src/shr.c
+	$(CC) -c $(CFLAGS) ../lib/bw.c
+	$(CC) -c $(CFLAGS) ../lib/ux.c
+
+perf perf-farm: $(STATIC_OBJS)
+	$(CC) -o $@ $(CFLAGS) $@.c $(STATIC_OBJS)
 
 # static pattern rule: multiple targets 
+$(OBJS): %.o: %.c
+	$(CC) -c $(CFLAGS) $< 
 
-$(OBJS) ../src/shr.o: %.o: %.c
-	$(CC) -o $@ -c $(CFLAGS) $< 
+$(PROGS): %: %.o $(STATIC_OBJS)
+	$(CC) -o $@ $(CFLAGS) $< $(STATIC_OBJS) $(LDFLAGS)
 
-$(PROGS): %: %.o ../src/shr.o
-	$(CC) -o $@ $(CFLAGS) $< ../src/shr.o $(LDFLAGS)
+.PHONY: clean tests
 
-
-run_tests: $(PROGS)
-	perl $(TESTS)
-
-.PHONY: clean
+tests:
+	perl ./do_tests
 
 clean:	
-	rm -f $(PROGS) $(OBJS) *.o test*.out *.ring
+	rm -f $(PROGS) *.out *.ring *.o

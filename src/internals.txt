@@ -1,0 +1,46 @@
+Some notes on the internals
+
+The ring is structured as
+
+   CONTROL - DATA - PADDING - MSGVEC - APPDATA
+
+The bulk of the ring is normally the DATA area. Messages are
+stored in it; their offsets are in the MSGVEC array of slots.
+From this we can already understand that the capacity of the 
+ring is limited by size of the DATA region and the number of
+slots in MSGVEC. (DATA is given at the time of ring creation
+as the size argument, while MSGVEC slots are either guessed
+using a heuristic or explicitly as an optional MAXMSGS_2 
+parameter to shr_init).
+
+The MSGVEC tracks which slot refers to the "eldest" message.
+The eldest is used for FARM mode readers, which start reads
+at the oldest message present in the ring.
+
+In versions of libshr prior to SHR_FARM mode, there was no
+MSGVEC and instead the messages were length-prefixed in the
+DATA region. While the code was straightforward this way,
+the disadvantage is that SHR_DROP mode had to reclaim space
+by "hopping" from message-to-message, finding their length
+prefixes before each message, in order to prepare for a 
+write. If there are, say, 10,000 messages that have to be
+hopped through to free space, that is a lot of scattered
+memory access. Instead the MSGVEC now allows DROP mode to
+easily reclaim space by scanning a concise slot array. It
+also makes FARM mode possible (or even, random access for
+FARM readers, although there is no API for this right now).
+
+The slots have a sequence number associated with them. The
+first message ever to go into the ring has sequence number
+zero. The sequence numbers are not stored anywhere, they 
+are implied from the "sequence number of the eldest slot".
+That is stored in r->q. The eldest slot has offset r->e 
+in the MSGVEC. The eldest slot, and the sequence number
+concept, is only important for FARM mode, since the FARM
+readers all have their own positions, and need to jump to
+the newest message if they miss too many messages.
+
+The APPDATA is opaque and needs no API or code support 
+except to store and read it. It is for storing caller
+data that it wants to keep with the ring.
+

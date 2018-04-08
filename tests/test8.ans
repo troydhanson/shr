@@ -1,6 +1,7 @@
 writing ...ok
 writing ...ok
-reading ...read 6 bytes
-abcdef
-reading ...read 0 bytes
+reading ...read 3 bytes
+abc
+reading ...read 3 bytes
+def
 end

@@ -1,16 +1,23 @@
-r: ready
-w: ready
-r: open
-w: open
-w: write
-r: read
-r: [squirrel]
-r: read
-w: write
-r: [squirrel]
-w: unlink
-w: close
-r: close
-w: eof
-r: eof
+w: do_open
+f: do_open
+r: do_open
+w: do_write_one
+w: 37; wrote 1 messages (to seq 1)
+w: do_stat
+ring size: 37, bytes: 0, messages: 0
+cache size: 37, bytes: 37, messages: 1
+w: do_close
+r: do_stat
+ring size: 37, bytes: 37, messages: 1
+cache size: 0, bytes: 0, messages: 0
+r: do_read_one
+0
+f: do_close
+r: do_close
+w: do_exit
+w: exiting
+f: do_exit
+f: exiting
+r: do_exit
+r: exiting
 end
