@@ -234,6 +234,11 @@ int query_ramdisk(char *ramdisk) {
     return 0;
   }
 
+  if (sf.f_type == HUGEFS_MAGIC) {
+    printf("%s: hugetlbfs (unbounded size)\n", ramdisk);
+    return 0;
+  }
+
   char szb[100];
   long bytes = sf.f_bsize*sf.f_blocks;
   if (bytes < KB) snprintf(szb, sizeof(szb), "%ld bytes", bytes);
