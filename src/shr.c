@@ -800,6 +800,8 @@ shr_readv(shr *s, char *buf, size_t len, struct iovec *iov, size_t *niov) {
   char *m1, *m2;
   ssize_t nr=0;
 
+  assert(s->flags & SHR_RDONLY);
+
   if (len == 0) goto done;
   if (*niov == 0) goto done;
   if (len > SSIZE_MAX) len = SSIZE_MAX;
@@ -926,6 +928,8 @@ ssize_t shr_writev(shr *s, struct iovec *iov, size_t niov) {
   struct msg *mv;
   ssize_t nr;
   char *buf;
+
+  assert(s->flags & SHR_WRONLY);
 
   for(i=0; i < niov; i++) {
     len += iov[i].iov_len;
