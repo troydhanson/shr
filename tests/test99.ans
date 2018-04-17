@@ -1,0 +1,8 @@
+bw 6 br 0 mw 6 mr 0 md 0 bd 0 bn 6 bu 6 mu 6
+bw 12 br 0 mw 12 mr 0 md 6 bd 6 bn 6 bu 6 mu 6
+read g
+read h
+read i
+read j
+read k
+read l

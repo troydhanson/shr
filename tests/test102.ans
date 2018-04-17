@@ -1,0 +1,5 @@
+bw 7 br 0 mw 3 mr 0 md 0 bd 0 bn 7 bu 7 mu 3
+bw 13 br 0 mw 6 mr 0 md 3 bd 7 bn 7 bu 6 mu 3
+read dd
+read ee
+read ff

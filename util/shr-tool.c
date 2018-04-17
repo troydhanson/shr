@@ -61,7 +61,7 @@ void usage() {
                  "---------------\n"
                  "status          get counters\n"
                  "create          create ring(s)\n"
-                 "read            read frames- ascii\n"
+                 "read            read frames- raw\n"
                  "readhex         read frames- hex/ascii\n"
                  "write           frames from stdin lines\n"
                  "writehex HEX    frame from hex argument\n"

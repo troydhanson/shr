@@ -32,11 +32,11 @@ struct msg {
  * the volatile offsets constantly change, under posix file lock,
  * as other processes copy data in or out of the ring. 
  */
-static char magic[] = "libshr4";
+static char magic[] = "libshr5";
 typedef struct {
   char magic[sizeof(magic)];
-  unsigned volatile gflags;
-  size_t volatile n;        /* allocd size */
+  unsigned        gflags;   /* global flags, fixed at creation      */
+  size_t          n;        /* allocd size, fixed at creation       */
   size_t volatile i;        /* offset from r->d for next write      */
   size_t volatile u;        /* current number of unread bytes       */
   size_t volatile m;        /* current number of unread messages    */
@@ -624,16 +624,15 @@ struct shr *shr_open(char *file, unsigned flags, ...) {
 }
 
 /* 
- * reclaim unread messages from the ring (SHR_DROP mode).
- * The oldest portion of ring data is sacrificed.
+ * drop unread messages from the ring (SHR_DROP mode).
+ * so that 'need' is satisfied from the available free
+ * space plus the dropped space.
  *
  * called under lock 
  *
- * preserves message boundaries by moving the read position 
- * to the now-eldest message after dropping to satisfy need
  */
-static void reclaim(struct shr *s, size_t need, size_t niov) {
-  size_t ab, am, i, e, z;
+static inline void drop_unread(struct shr *s, size_t need, size_t niov) {
+  size_t ab, am, i, p, z;
   shr_ctrl *r = s->r;
   struct msg *mv;
 
@@ -650,32 +649,21 @@ static void reclaim(struct shr *s, size_t need, size_t niov) {
 
   i = 0;
   z = 0;
-  e = r->e;
+  p = r->r;
 
-  /* drop messages to free enough space */
-  while (need > ab+z) {
-    z += mv[ e ].len;
+  /* drop messages to free slots and space */
+  while ((niov > am+i) || (need > ab+z)) {
+    z += mv[ p ].len;
     i++;
-    e++;
-    if (e == s->mm) e = 0;
+    p++;
+    if (p == s->mm) p = 0;
   }
 
-  /* drop messages to free enough slots */
-  while (niov > am+i) {
-    z += mv[ e ].len;
-    i++;
-    e++;
-    if (e == s->mm) e = 0;
-  }
-
+  r->r = p;
   r->u -= z;
+  r->m -= i;
   r->stat.bd += z;
   r->stat.md += i;
-  r->mp -= i;
-  r->m -= i;
-  r->r = ( r->r + i ) % r->mm;
-  r->e = ( r->e + i ) % r->mm;
-  r->q += i;
 
   assert(r->n - r->u >= need);
   assert(r->mm - r->m >= niov);
@@ -734,8 +722,8 @@ ssize_t shr_read(struct shr *s, char *buf, size_t len) {
  *    0  (no message ready) 
  *    1  message is ready
  */
-static int next_msg_info(shr *s, char **m1, size_t *l1,
-                                 char **m2, size_t *l2 ) {
+static inline int next_msg_info(shr *s, char **m1, size_t *l1,
+                                        char **m2, size_t *l2 ) {
   int msg_ready, msg_wraps;
   size_t slot, len, pos;
   shr_ctrl *r = s->r;
@@ -869,41 +857,6 @@ shr_readv(shr *s, char *buf, size_t len, struct iovec *iov, size_t *niov) {
   return (rc == 0) ? (ssize_t)nr : rc;
 }
 
-/*
- * advance_eldest
- *
- * accomodate 'len' bytes of overwrite 
- * (from r->i). if it will overwrite
- * eldest message(s) then advance eldest
- *
- * called with ring under lock
- *
- */
-static void advance_eldest(shr *s, size_t len) {
-  shr_ctrl *r = s->r;
-  struct msg *mv;
-  size_t ep, el, eoe, eow;
-  int wsie, weie;
-
-  mv = (struct msg*)(r->d + r->n + r->pad_len);
-
-  while(r->mp) {
-    ep = mv[ r->e ].pos;
-    el = mv[ r->e ].len;
-
-    eoe = (ep + el) % r->n;
-    eow = (r->i + len) % r->n;
-
-    wsie = ((r->i >= ep) && (r->i < eoe)) ? 1 : 0;
-    weie = ((eow > ep) && (eow <= eoe)) ? 1: 0;
-
-    if ((wsie == 0) && (weie == 0)) break;
-
-    r->e = (r->e + 1) % r->mm;
-    r->mp--;
-    r->q++;
-  }
-}
 
 /*
  * write sequential io buffers into ring
@@ -922,7 +875,7 @@ static void advance_eldest(shr *s, size_t len) {
  *
  */
 ssize_t shr_writev(shr *s, struct iovec *iov, size_t niov) {
-  size_t bsz, len=0, i, l1, l2;
+  size_t bsz, len=0, i, l1, l2, p, l, e, a, mp;
   int rc = -1, sc, msg_wraps;
   shr_ctrl *r = s->r;
   struct msg *mv;
@@ -930,6 +883,7 @@ ssize_t shr_writev(shr *s, struct iovec *iov, size_t niov) {
   char *buf;
 
   assert(s->flags & SHR_WRONLY);
+  mv = (struct msg*)(r->d + r->n + r->pad_len);
 
   for(i=0; i < niov; i++) {
     len += iov[i].iov_len;
@@ -976,7 +930,7 @@ ssize_t shr_writev(shr *s, struct iovec *iov, size_t niov) {
         (r->mm - r->m >= niov)) break;
 
     if (r->gflags & SHR_DROP) {
-      reclaim(s, len, niov);
+      drop_unread(s, len, niov);
       break;
     }
 
@@ -991,25 +945,46 @@ ssize_t shr_writev(shr *s, struct iovec *iov, size_t niov) {
     if (sc) return sc;
   }
 
+  /* sufficient free space has been made available. */
   assert(r->n - r->u >= len);
   assert(r->m + niov <= r->mm);
   assert(r->mp <= r->mm);
-  mv = (struct msg*)(r->d + r->n + r->pad_len);
 
-  /* at this point, sufficient free space in the
-   * ring and enough mv slots are available.
-   * if we're about to overwrite the eldest read 
-   * message(s) we need to advance eldest too. */
-  advance_eldest(s, len);
+  /* advance eldest position if our write will overwrite
+   * its data or occupy its slot in mv. copy volatile r->*
+   * to involatile locals here for speed; we hold lock */
+  a = 0;
+  e = r->e;
+  mp = r->mp;
+  i = r->i;
+  while (mp) {
+    if (i > mv[ e ].pos)
+      l = (r->n - i) + mv[ e ].pos;
+    else
+      l = mv[ e ].pos - i;
+
+    if ((len <= l) && (s->mm - mp >= niov))
+      break;
+
+    e++;
+    if (e == s->mm) e = 0;
+    a++;
+    mp--;
+  }
+  r->e = e;
+  r->q += a;
+  r->mp = mp;
+
+  /* finally. copy the data in */
+  p = ( r->e + r->mp ) % r->mm;
 
   for(i=0; i < niov; i++) {
-
     buf = iov[i].iov_base;
     bsz = iov[i].iov_len;
     assert(bsz > 0);
 
-    mv[ ( r->e + r->mp ) % r->mm].pos = r->i;
-    mv[ ( r->e + r->mp ) % r->mm].len = bsz;
+    mv[ p ].pos = r->i;
+    mv[ p ].len = bsz;
 
     msg_wraps = (r->i + bsz > r->n) ? 1 : 0;
     l1 = msg_wraps ? (r->n - r->i) : bsz;
@@ -1018,10 +993,13 @@ ssize_t shr_writev(shr *s, struct iovec *iov, size_t niov) {
     memcpy(r->d + r->i, buf, l1);
     if (l2) memcpy(r->d, buf + l1, l2);
     r->i = (r->i + bsz) % r->n;
-    r->u += bsz;
-    r->mp++;
-    r->m++;
+    p++;
+    if (p == r->mm) p = 0;
   }
+
+  r->u += len;
+  r->mp += niov;
+  r->m += niov;
 
   sc = bw_wake(s->w2r);
   if (sc) goto done;

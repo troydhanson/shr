@@ -1,0 +1,4 @@
+bw 6 br 0 mw 3 mr 0 md 0 bd 0 bn 7 bu 6 mu 3
+read a
+bw 10 br 1 mw 4 mr 1 md 2 bd 5 bn 7 bu 4 mu 1
+read dddd
