@@ -78,7 +78,7 @@ void usage() {
                  "  -s size        size with kmgt suffix\n"
                  "  -A file        copy file into app-data\n"
                  "  -N maxmsgs     set max number of messages\n"
-                 "  -m dfkshl      flags (combinable, default: 0)\n"
+                 "  -m dfksl       flags (combinable, default: 0)\n"
                  "      d          drop unread frames when full\n"
                  "      f          farm of independent readers\n"
                  "      k          keep ring as-is if it exists\n"
@@ -489,6 +489,7 @@ int main(int argc, char *argv[]) {
       if (stat.flags & SHR_APPDATA) printf("appdata ");
       if (stat.flags & SHR_FARM)    printf("farm ");
       if (stat.flags & SHR_MLOCK)   printf("mlock ");
+      if (stat.flags & SHR_SYNC)    printf("sync ");
       printf("\n");
 
       app_data = NULL;
