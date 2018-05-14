@@ -4,8 +4,8 @@ OBJS =$(patsubst %.c,%.o,$(SRCS))
 
 CFLAGS = -I../src -I../lib
 CFLAGS += -Wall -Wextra
-CFLAGS += -g -O0
-#CFLAGS += -O2
+#CFLAGS += -g -O0
+CFLAGS += -O2
 
 STATIC_OBJS=shr.o bw.o ux.o
 
