@@ -62,6 +62,7 @@ struct {
   int flags;
   int fd;
   int block;
+  size_t nread;
   char *hex_arg;
   char *wfile;
   char *wfile_buf;
@@ -124,6 +125,7 @@ void usage() {
                  "read options\n"
                  "------------\n"
                  "  -b            wait for data when exhausted\n"
+                 "  -N maxmsgs    max number of messages to read\n"
                  "\n"
                  "create options\n"
                  "--------------\n"
@@ -652,7 +654,7 @@ int handle_io(void) {
   int rc = -1, sc, fl;
   ssize_t nr, np;
   uint32_t len32;
-  size_t len;
+  size_t len, nw;
   char *out;
 
   nr = shr_read(cfg.shr, cfg.buf, BUFLEN);
@@ -680,8 +682,21 @@ int handle_io(void) {
       /* data to print */
       assert(nr > 0);
       if (cfg.mode == mode_read_hex) hexdump(cfg.buf,nr);
-      else printf("%.*s\n", (int)nr, cfg.buf);
+      else do {
+        out = cfg.buf;
+        nw = write(STDOUT_FILENO, out, nr);
+        if (nw < 0) {
+          fprintf(stderr, "write: %s\n", strerror(errno));
+          goto done;
+        }
+        nr -= nw;
+        out += nw;
+      } while (nr > 0);
       fflush(stdout);
+      cfg.nread++;
+      if ((cfg.max_msgs > 0) && (cfg.nread >= cfg.max_msgs)) {
+        goto done;
+      }
       break;
 
     case mode_pub:
