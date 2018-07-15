@@ -546,7 +546,7 @@ static int init_cache(struct shr *s, int flags) {
  *  NULL on error
  *
  */
-struct shr *shr_open(char *file, unsigned flags, ...) {
+struct shr *shr_open(const char *file, unsigned flags, ...) {
   int rc = -1, sc, prot;
   struct shr *s = NULL;
 

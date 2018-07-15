@@ -54,7 +54,7 @@ struct shr_stat {
 };
 
 int shr_init(char *file, size_t sz, unsigned flags, ...);
-shr *shr_open(char *file, unsigned flags, ...);
+shr *shr_open(const char *file, unsigned flags, ...);
 int shr_get_selectable_fd(shr *s);
 ssize_t shr_read(shr *s, char *buf, size_t len);
 ssize_t shr_write(shr *s, char *buf, size_t len);
