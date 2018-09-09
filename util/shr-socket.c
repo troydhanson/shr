@@ -77,9 +77,9 @@ void usage() {
   fprintf(stderr,"\n");
   fprintf(stderr,"options:\n");
   fprintf(stderr," -s host:port   server address\n");
-  fprintf(stderr," -i <ring1>     ring for incoming frames (socket -> ring)\n");
-  fprintf(stderr," -o <ring2>     ring for outgoing frames (ring -> socket)\n");
-  fprintf(stderr," -L             omit u32 length on outgoing frames\n");
+  fprintf(stderr," -i ring        incoming message ring\n");
+  fprintf(stderr," -o ring        outgoing message ring\n");
+  fprintf(stderr," -L             omit length prefix\n");
   fprintf(stderr," -v             verbose\n");
   fprintf(stderr," -x             hex dump\n");
   fprintf(stderr,"\n");
@@ -250,6 +250,7 @@ int decode_frames(void) {
     cfg.rx_iov[ iov_used ].iov_base = body;
     cfg.rx_iov[ iov_used ].iov_len  = blen;
     iov_used++;
+    if (cfg.hex) hexdump(body, blen);
     if (iov_used == NUMIOV) break;
     c += sizeof(uint32_t) + blen;
   }
@@ -328,22 +329,26 @@ int handle_txring(void) {
     b = cfg.rx_iov[ n ].iov_base;
     l = cfg.rx_iov[ n ].iov_len;
 
-    /* optional length prefix */
-    if (cfg.omit_length_prefix == 0) {
-      if (l > UINT32_MAX) {
-        fprintf(stderr, "%zu byte frame length exceeds 32-bits\n", l);
-        goto done;
-      }
-      u32 = (uint32_t)l;
-      sr = write(cfg.socket_fd, &u32, sizeof(u32));
-      if (sr < 0) {
-        fprintf(stderr, "write: %s\n", strerror(errno));
-        goto done;
-      }
-      assert(sr == sizeof(u32));
+    if (cfg.omit_length_prefix)
+      goto body;
+
+    if (l > UINT32_MAX) {
+      fprintf(stderr, "overlong frame length %zu\n", l);
+      goto done;
     }
 
+    /* send length prefix */
+    u32 = (uint32_t)l;
+    sr = write(cfg.socket_fd, &u32, sizeof(u32));
+    if (sr < 0) {
+      fprintf(stderr, "write: %s\n", strerror(errno));
+      goto done;
+    }
+    assert(sr == sizeof(u32));
+
+  body:
     /* send frame body */
+    if (cfg.hex) hexdump(b, l);
     do {
       sr = write(cfg.socket_fd, b, l);
       if (sr < 0) {
@@ -393,14 +398,14 @@ int main(int argc, char *argv[]) {
   cfg.txring_fd = shr_get_selectable_fd(cfg.tx);
   assert(cfg.txring_fd != -1);
 
-  /* remote sends messages; we deframe and write to rx */
+  /* remote sends messages; we deframe and write to rx ring */
   cfg.rx = shr_open(cfg.rxname, SHR_WRONLY);
   if (cfg.rx == NULL) goto done;
 
   sc = do_connect();
   if (sc < 0) goto done;
 
-  /* block all signals. we take signals synchronously via signalfd */
+  /* block all signals. take signals synchronously via signalfd */
   sigset_t all;
   sigfillset(&all);
   sigprocmask(SIG_SETMASK,&all,NULL);
@@ -438,9 +443,18 @@ int main(int argc, char *argv[]) {
       goto done;
     }
 
-    if      (ev.data.fd == cfg.signal_fd) { if (handle_signal() < 0) goto done;}
-    else if (ev.data.fd == cfg.socket_fd) { if (handle_socket() < 0) goto done;}
-    else if (ev.data.fd == cfg.txring_fd) { if (handle_txring() < 0) goto done;}
+    if (ev.data.fd == cfg.signal_fd) {
+      sc = handle_signal();
+      if (sc < 0) goto done;
+    }
+    else if (ev.data.fd == cfg.socket_fd) {
+      sc = handle_socket();
+      if (sc < 0) goto done;
+    }
+    else if (ev.data.fd == cfg.txring_fd) {
+      sc = handle_txring();
+      if (sc < 0) goto done;
+    }
     else {
       assert(0);
       goto done;
