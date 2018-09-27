@@ -86,7 +86,7 @@ void usage() {
   fprintf(stderr," -v             verbose\n");
   fprintf(stderr," -x             hex dump\n");
   fprintf(stderr,"\n");
-  fprintf(stderr,"-D mode responds to remote socket closure by\n");
+  fprintf(stderr,"-D mode responds to local shutdown or socket EOF by\n");
   fprintf(stderr,"   writing a synthetic message to the incoming\n");
   fprintf(stderr,"   message ring, comprised of bytes from the hex\n");
   fprintf(stderr,"   string, e.g. deadbeef\n");
@@ -287,7 +287,7 @@ int decode_frames(void) {
 int handle_socket(void) {
   int rc = -1;
   size_t avail;
-  ssize_t nr, er;
+  ssize_t nr;
   char *b;
 
   assert(cfg.rx_buf_used < BUFLEN);
@@ -297,10 +297,6 @@ int handle_socket(void) {
   nr = read(cfg.socket_fd, b, avail);
   if (nr <= 0) {
     fprintf(stderr, "read: %s\n", nr ? strerror(errno) : "eof");
-    if (cfg.eof_msg) {
-      er = shr_write(cfg.rx, cfg.eof_msg, cfg.eof_msg_len);
-      if (er < 0) fprintf(stderr, "shr_write: error %zd\n", er);
-    }
     goto done;
   }
 
@@ -410,6 +406,7 @@ int unhex(char *h) {
 int main(int argc, char *argv[]) {
   struct epoll_event ev;
   int opt, rc=-1, sc;
+  ssize_t nr;
   
   cfg.prog = argv[0];
 
@@ -508,6 +505,10 @@ int main(int argc, char *argv[]) {
   rc = 0;
  
  done:
+  if (cfg.eof_msg && cfg.rx) {
+    nr = shr_write(cfg.rx, cfg.eof_msg, cfg.eof_msg_len);
+    if (nr < 0) fprintf(stderr, "shr_write: error %zd\n", nr);
+  }
   if (cfg.socket_fd != -1) close(cfg.socket_fd);
   if (cfg.signal_fd != -1) close(cfg.signal_fd);
   if (cfg.epoll_fd != -1) close(cfg.epoll_fd);
