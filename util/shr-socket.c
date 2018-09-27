@@ -56,6 +56,7 @@ struct {
   int epoll_fd;
   int hex;
   int omit_length_prefix;
+  int unlink_on_eof;
   size_t rx_buf_used;
   struct iovec *rx_iov;
   char *rx_buf;
@@ -82,14 +83,13 @@ void usage() {
   fprintf(stderr," -i ring        incoming message ring\n");
   fprintf(stderr," -o ring        outgoing message ring\n");
   fprintf(stderr," -L             omit length prefix\n");
-  fprintf(stderr," -D <hex>       on eof write <hex>\n");
+  fprintf(stderr," -D <hex>       ring message on exit\n");
+  fprintf(stderr," -U             unlink rings on exit\n");
   fprintf(stderr," -v             verbose\n");
   fprintf(stderr," -x             hex dump\n");
   fprintf(stderr,"\n");
-  fprintf(stderr,"-D mode responds to local shutdown or socket EOF by\n");
-  fprintf(stderr,"   writing a synthetic message to the incoming\n");
-  fprintf(stderr,"   message ring, comprised of bytes from the hex\n");
-  fprintf(stderr,"   string, e.g. deadbeef\n");
+  fprintf(stderr,"-D mode writes a synthetic message to the incoming\n");
+  fprintf(stderr,"   message ring on shutdown, from hex e.g. deadbeef\n");
   fprintf(stderr,"\n");
   exit(-1);
 }
@@ -410,11 +410,12 @@ int main(int argc, char *argv[]) {
   
   cfg.prog = argv[0];
 
-  while ( (opt = getopt(argc,argv,"vxhs:i:o:LD:")) > 0) {
+  while ( (opt = getopt(argc,argv,"vxhs:i:o:LD:U")) > 0) {
     switch(opt) {
       case 'v': cfg.verbose++; break;
       case 'x': cfg.hex=1; break;
       case 'L': cfg.omit_length_prefix=1; break;
+      case 'U': cfg.unlink_on_eof=1; break;
       case 's': cfg.server = strdup(optarg); break;
       case 'i': cfg.rxname = strdup(optarg); break;
       case 'o': cfg.txname = strdup(optarg); break;
@@ -509,6 +510,8 @@ int main(int argc, char *argv[]) {
     nr = shr_write(cfg.rx, cfg.eof_msg, cfg.eof_msg_len);
     if (nr < 0) fprintf(stderr, "shr_write: error %zd\n", nr);
   }
+  if (cfg.unlink_on_eof && cfg.rxname) unlink(cfg.rxname);
+  if (cfg.unlink_on_eof && cfg.txname) unlink(cfg.txname);
   if (cfg.socket_fd != -1) close(cfg.socket_fd);
   if (cfg.signal_fd != -1) close(cfg.signal_fd);
   if (cfg.epoll_fd != -1) close(cfg.epoll_fd);
