@@ -61,6 +61,8 @@ struct {
   char *rx_buf;
   struct iovec *tx_iov;
   char *tx_buf;
+  char *eof_msg;
+  size_t eof_msg_len;
 } cfg = {
   .socket_fd = -1,
   .signal_fd = -1,
@@ -80,8 +82,14 @@ void usage() {
   fprintf(stderr," -i ring        incoming message ring\n");
   fprintf(stderr," -o ring        outgoing message ring\n");
   fprintf(stderr," -L             omit length prefix\n");
+  fprintf(stderr," -D <hex>       on eof write <hex>\n");
   fprintf(stderr," -v             verbose\n");
   fprintf(stderr," -x             hex dump\n");
+  fprintf(stderr,"\n");
+  fprintf(stderr,"-D mode responds to remote socket closure by\n");
+  fprintf(stderr,"   writing a synthetic message to the incoming\n");
+  fprintf(stderr,"   message ring, comprised of bytes from the hex\n");
+  fprintf(stderr,"   string, e.g. deadbeef\n");
   fprintf(stderr,"\n");
   exit(-1);
 }
@@ -279,7 +287,7 @@ int decode_frames(void) {
 int handle_socket(void) {
   int rc = -1;
   size_t avail;
-  ssize_t nr;
+  ssize_t nr, er;
   char *b;
 
   assert(cfg.rx_buf_used < BUFLEN);
@@ -289,6 +297,10 @@ int handle_socket(void) {
   nr = read(cfg.socket_fd, b, avail);
   if (nr <= 0) {
     fprintf(stderr, "read: %s\n", nr ? strerror(errno) : "eof");
+    if (cfg.eof_msg) {
+      er = shr_write(cfg.rx, cfg.eof_msg, cfg.eof_msg_len);
+      if (er < 0) fprintf(stderr, "shr_write: error %zd\n", er);
+    }
     goto done;
   }
 
@@ -367,13 +379,41 @@ int handle_txring(void) {
   return rc;
 }
 
+/* unhexer, overwrites input space;
+ * returns number of bytes or -1 */
+int unhex(char *h) {
+  char b;
+  int rc = -1;
+  unsigned u;
+  size_t i, len = strlen(h);
+
+  if (len == 0) goto done;
+  if (len &  1) goto done; /* odd number of digits */
+  for(i=0; i < len; i += 2) {
+    if (sscanf( &h[i], "%2x", &u) < 1) goto done;
+    assert(u <= 255);
+    b = (unsigned char)u;
+    h[i/2] = b;
+  }
+
+  rc = 0;
+
+ done:
+  if (rc < 0) {
+    fprintf(stderr, "hex conversion failed\n");
+    return -1;
+  }
+
+  return len/2;
+}
+
 int main(int argc, char *argv[]) {
   struct epoll_event ev;
   int opt, rc=-1, sc;
   
   cfg.prog = argv[0];
 
-  while ( (opt = getopt(argc,argv,"vxhs:i:o:L")) > 0) {
+  while ( (opt = getopt(argc,argv,"vxhs:i:o:LD:")) > 0) {
     switch(opt) {
       case 'v': cfg.verbose++; break;
       case 'x': cfg.hex=1; break;
@@ -381,6 +421,10 @@ int main(int argc, char *argv[]) {
       case 's': cfg.server = strdup(optarg); break;
       case 'i': cfg.rxname = strdup(optarg); break;
       case 'o': cfg.txname = strdup(optarg); break;
+      case 'D': cfg.eof_msg = strdup(optarg);
+                cfg.eof_msg_len = unhex(cfg.eof_msg);
+                if (cfg.eof_msg_len < 0) usage();
+                break;
       case 'h': default: usage(); break;
     }
   }
@@ -471,6 +515,7 @@ int main(int argc, char *argv[]) {
   if (cfg.rxname) free(cfg.rxname);
   if (cfg.txname) free(cfg.txname);
   if (cfg.server) free(cfg.server);
+  if (cfg.eof_msg) free(cfg.eof_msg);
   if (cfg.rx) shr_close(cfg.rx);
   if (cfg.tx) shr_close(cfg.tx);
   return rc;
