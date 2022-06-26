@@ -21,6 +21,8 @@
 #include <time.h>
 #include "shr.h"
 
+extern char **environ;
+
 /* 
  * shr tool
  *
@@ -840,6 +842,69 @@ int setup_listener(void) {
   return rc;
 }
 
+/*
+ * We delegate to other executables to manage complexity.
+ *
+ * If we are invoked as     /path/to/foo bar
+ * we look for executable   /path/to/foo-bar
+ *
+ * If found, this function exec's it, preserving
+ * the arguments after bar. Otherwise returns -1.
+ *
+ * Delegates reside in the same directory as this program.
+ *
+ */
+
+char path[PATH_MAX];
+int try_delegate(int argc, char *argv[]) {
+  const char *self = "/proc/self/exe";
+
+  if (argc < 2) return -1;
+  char *subcmd = argv[1];
+
+  ssize_t nr;
+  nr = readlink(self, path, sizeof(path));
+  if (nr < 0) {
+    fprintf(stderr, "readlink %s: %s\n", self, strerror(errno));
+    return -1;
+  }
+
+  if ((nr == sizeof(path)) || (nr == 0)) {
+    fprintf(stderr, "readlink: truncation or empty path\n");
+    return -1;
+  }
+
+  /* form /path/to/self 
+   * into /path/to/self-subcommand
+   */
+
+  size_t subcmd_len, fully_qualified_len;
+  subcmd_len = strlen(subcmd);
+  fully_qualified_len = nr + 1 /* hyphen */ + subcmd_len + 1 /* nul */;
+  if (fully_qualified_len > sizeof(path)) {
+    fprintf(stderr, "delegate path too long\n");
+    return -1;
+  }
+
+  path[nr] = '-';
+  memcpy(&path[nr+1], subcmd, subcmd_len);
+  path[nr+1+subcmd_len] = '\0';
+
+  /* does the delegate exist? */
+  int rc = access(path, F_OK);
+  if (rc == -1) {
+    return -1;
+  }
+
+  /* execute the delegate command */
+  argv[1] = path;
+  rc = execve(path, &argv[1], environ);
+
+  /* NOT REACHED AFTER SUCCESSFUL EXEC */
+  fprintf(stderr, "execve %s: %s\n", path, strerror(errno));
+  return -1;
+}
+
 int main(int argc, char *argv[]) {
   int n, one_shot=0, opt, rc=-1, sc, mode, fd, epoll_mode, tmo, ec;
   char unit, *c, *app_data, *cmd, line[1000], opts[100],
@@ -852,7 +917,7 @@ int main(int argc, char *argv[]) {
   struct stat sb;
   ssize_t nr;
 
-  if (argc < 3) usage();
+  if (argc < 2) usage();
  
   cmd = argv[1];
   if      (!strcmp(cmd, "status"))    cfg.mode = mode_status;
@@ -866,7 +931,12 @@ int main(int argc, char *argv[]) {
   else if (!strcmp(cmd, "pub"))       cfg.mode = mode_pub;
   else if (!strcmp(cmd, "sub"))       cfg.mode = mode_sub;
   else if (!strcmp(cmd, "tee"))       cfg.mode = mode_tee;
-  else /* "help" or anything else */  usage();
+  else {
+    /* on success, delegate execs */
+    try_delegate(argc, argv);
+    /* no delegate found, print help */
+    usage();
+  }
 
   argv++;
   argc--;
