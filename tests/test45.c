@@ -14,7 +14,7 @@
 #define R 1
 #define F 2
 
-char *ring = "/dev/shm/" __FILE__ ".ring";
+char *ring =  __FILE__ ".ring";
 
 /* make an enum and a char*[] for the ops */
 #define adim(x) (sizeof(x)/sizeof(*x))

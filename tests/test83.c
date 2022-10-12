@@ -10,7 +10,7 @@
 #include <time.h>
 #include "shr.h"
 
-char *ring = "/dev/shm/" __FILE__ ".ring";
+char *ring =  __FILE__ ".ring";
 int ring_sz = 7;
 int nmsg = 100;
 

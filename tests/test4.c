@@ -3,7 +3,7 @@
 #include "shr.h"
 
 char *data = "abcdefghi";
-char *ring = "/dev/shm/" __FILE__ ".ring";
+char *ring =  __FILE__ ".ring";
 
 char out[10];
 

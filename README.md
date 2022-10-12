@@ -86,17 +86,22 @@ Very briefly,
 
 ## Build & Install
 
-You should have gcc, autoconf, automake, and libtool installed first.
+You should have gcc and cmake installed first.
 
     cd shr
-    ./autogen.sh
-    ./configure
+    mkdir build && cd build
+    cmake ..
     make
-    sudo make install
+
+    # test harness is slow; optional!
+    make test
+
+    # install
+    sudo cmake --install . --prefix=/usr
     sudo ldconfig
 
-Afterward, libshr.so can be found in `/usr/local/lib`, the shr.h header in
-`/usr/local/include` and shr-tool in `/usr/local/bin`.
+Afterward, libshr.so can be found in `/usr/lib`, the shr.h header in
+`/usr/include` and shr-tool in `/usr/bin`.
 
 ## API
 

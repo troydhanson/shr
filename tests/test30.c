@@ -23,7 +23,7 @@ char msg[]  =      "1234567890abcdefghijklmnopqrstuvwxyz"
 int nmsg = 1000000;
 #define ring_sz (sizeof(msg) * nmsg)
 
-char *ring = "/dev/shm/" __FILE__ ".ring";
+char *ring =  __FILE__ ".ring";
 
 void delay() { usleep(50000); }
 

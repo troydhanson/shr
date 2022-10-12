@@ -13,7 +13,7 @@
 #define W 0
 #define R 1
 
-char *ring = "/dev/shm/" __FILE__ ".ring";
+char *ring = "/dev/shm/perf-farm.ring";
 
 /* make an enum and a char*[] for the ops */
 #define adim(x) (sizeof(x)/sizeof(*x))

@@ -13,7 +13,7 @@ char msg[] = "abc";
 #define ring_sz (sizeof(msg)*10)
 #define adim(a) (sizeof(a)/sizeof(*a))
 
-char *ring = "/dev/shm/" __FILE__ ".ring";
+char *ring =  __FILE__ ".ring";
 
 void delay() { usleep(50000); }
 

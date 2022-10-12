@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include "shr.h"
 
-char *ring = "/dev/shm/" __FILE__ ".ring";
+char *ring =  __FILE__ ".ring";
 
 int main() {
   setlinebuf(stdout);

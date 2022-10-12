@@ -34,7 +34,7 @@ $(PROGS): %: %.o $(STATIC_OBJS)
 .PHONY: clean tests
 
 tests:
-	perl ./do_tests
+	./do_tests.py
 
 clean:	
 	rm -f $(PROGS) *.out *.ring *.o

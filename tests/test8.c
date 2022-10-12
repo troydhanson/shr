@@ -2,7 +2,7 @@
 #include <unistd.h>
 #include "shr.h"
 
-char *ring = "/dev/shm/" __FILE__ ".ring";
+char *ring =  __FILE__ ".ring";
 char *data = "abcdefghi";
 
 char out[10];

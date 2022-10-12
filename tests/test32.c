@@ -25,7 +25,7 @@ int nmsg = 1000000;
 /* this ring sz forces the second message to wrap after its prefix */
 #define ring_sz (sizeof(size_t) + sizeof(msg) + 0 )
 
-char *ring = "/dev/shm/" __FILE__ ".ring";
+char *ring =  __FILE__ ".ring";
 
 void delay() { usleep(50000); }
 
